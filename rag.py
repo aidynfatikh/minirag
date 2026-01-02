@@ -33,10 +33,20 @@ class RAG:
             'pdf_name': pdf_name,
             'page': page['page'],
             'content': page['text'],
-            'word_count': len(page['text'].split())
+            'word_count': len(page['text'].split()),
+            'hierarchy_path': page.get('hierarchy_path', []),
+            'hierarchy_context': page.get('hierarchy_context', ''),
+            'metadata': page.get('metadata', {}),
+            'headers': page.get('metadata', {}).get('headers', []),
+            'section': page.get('metadata', {}).get('section', None)
         } for page in pages]
         
         print(f"Loaded {len(self.documents)} pages from {pdf_name}")
+        
+        # Print summary of detected headers
+        total_headers = sum(len(doc.get('headers', [])) for doc in self.documents)
+        sections = set(doc.get('section') for doc in self.documents if doc.get('section'))
+        print(f"Detected {total_headers} headers across {len(sections)} sections")
     
     def _chunk_text(self, text: str, chunk_size: int = 512, overlap: int = 50) -> List[str]:
         if not text:
@@ -90,6 +100,10 @@ class RAG:
         for doc_idx, doc in enumerate(self.documents):
             pdf_name = doc.get('pdf_name', 'N/A')
             page_num = doc.get('page', 0)
+            section = doc.get('section', None)
+            headers = doc.get('headers', [])
+            metadata = doc.get('metadata', {})
+            hierarchy_context = doc.get('hierarchy_context', '')
             
             if use_summary and 'summary' in doc and doc['summary']:
                 chunks = [doc['summary']]
@@ -99,13 +113,21 @@ class RAG:
                 chunks = [f"Page {page_num}"]
             
             for chunk_idx, chunk_text in enumerate(chunks):
+                # Prepend hierarchy context to chunk for embedding
+                chunk_with_context = hierarchy_context + chunk_text
+                
                 self.chunks.append({
-                    'text': chunk_text,
+                    'text': chunk_with_context,  # Text WITH context for embedding
+                    'original_text': chunk_text,  # Original text without context for display
+                    'hierarchy_context': hierarchy_context,
                     'doc_idx': doc_idx,
                     'chunk_idx': chunk_idx,
                     'pdf_name': pdf_name,
                     'page': page_num,
-                    'total_chunks': len(chunks)
+                    'total_chunks': len(chunks),
+                    'section': section,
+                    'headers': headers,
+                    'metadata': metadata
                 })
         
         print(f"Created {len(self.chunks)} chunks from {len(self.documents)} documents")
@@ -168,15 +190,21 @@ class RAG:
                 
                 cosine_similarity = 1 - (dist ** 2) / 2
                 
+                # Use original text for display (without hierarchy context)
+                display_text = chunk.get('original_text', chunk['text'])
+                
                 result = {
                     'rank': i + 1,
                     'cosine_similarity': float(cosine_similarity),
                     'l2_distance': float(dist),
                     'pdf_name': chunk['pdf_name'],
                     'page': chunk['page'],
-                    'chunk': chunk['text'][:500] + '...' if len(chunk['text']) > 500 else chunk['text'],
+                    'chunk': display_text[:500] + '...' if len(display_text) > 500 else display_text,
                     'chunk_info': f"{chunk['chunk_idx'] + 1}/{chunk['total_chunks']}",
-                    'word_count': doc.get('word_count', 0)
+                    'word_count': doc.get('word_count', 0),
+                    'section': chunk.get('section', None),
+                    'headers': chunk.get('headers', []),
+                    'hierarchy': chunk.get('hierarchy_context', '')
                 }
                 results.append(result)
         
@@ -197,14 +225,20 @@ class RAG:
                 chunk = self.chunks[idx]
                 doc = self.documents[chunk['doc_idx']]
                 
+                # Use original text for display
+                display_text = chunk.get('original_text', chunk['text'])
+                
                 result = {
                     'rank': i + 1,
                     'bm25_score': float(scores[idx]),
                     'pdf_name': chunk['pdf_name'],
                     'page': chunk['page'],
-                    'chunk': chunk['text'][:500] + '...' if len(chunk['text']) > 500 else chunk['text'],
+                    'chunk': display_text[:500] + '...' if len(display_text) > 500 else display_text,
                     'chunk_info': f"{chunk['chunk_idx'] + 1}/{chunk['total_chunks']}",
-                    'word_count': doc.get('word_count', 0)
+                    'word_count': doc.get('word_count', 0),
+                    'section': chunk.get('section', None),
+                    'headers': chunk.get('headers', []),
+                    'hierarchy': chunk.get('hierarchy_context', '')
                 }
                 results.append(result)
         

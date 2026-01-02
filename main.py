@@ -28,6 +28,8 @@ def main():
         for result in bm25_results:
             print(f"\nRank {result['rank']} | BM25 Score: {result['bm25_score']:.4f}")
             print(f"PDF: {result['pdf_name']} | Page: {result['page']} (Chunk {result['chunk_info']})")
+            if result.get('hierarchy'):
+                print(f"\n{result['hierarchy'].strip()}")
             print(f"Text: {result['chunk']}")
         
         print("\n" + "=" * 80)
@@ -37,6 +39,8 @@ def main():
         for result in embedding_results:
             print(f"\nRank {result['rank']} | Cosine Similarity: {result['cosine_similarity']:.4f}")
             print(f"PDF: {result['pdf_name']} | Page: {result['page']} (Chunk {result['chunk_info']})")
+            if result.get('hierarchy'):
+                print(f"\n{result['hierarchy'].strip()}")
             print(f"Text: {result['chunk']}")
         
         print("\n" + "=" * 80)
