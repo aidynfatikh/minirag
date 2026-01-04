@@ -1,15 +1,37 @@
 import faiss
 import json
-from sentence_transformers import SentenceTransformer
-from typing import List, Dict
+from sentence_transformers import SentenceTransformer, CrossEncoder
+from typing import List, Dict, Optional
 import re
 from rank_bm25 import BM25Okapi
+import numpy as np
+from generator import Generator
 
 class RAG:    
-    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', m: int = 32, ef_construction: int = 200):        
+    def __init__(self, model_name: str = 'intfloat/e5-large-v2', m: int = 32, ef_construction: int = 200, use_reranker: bool = True, use_generator: bool = False):        
+        self.model_name = model_name
+        self.is_e5_model = 'e5-' in model_name.lower()
+        
         print(f"Loading embedding model: {model_name}...")
         self.model = SentenceTransformer(model_name, device="cuda")
         self.embedding_dim = self.model.get_sentence_embedding_dimension()
+        print(f"Embedding dimension: {self.embedding_dim}")
+        
+        # Load reranker
+        self.use_reranker = use_reranker
+        if use_reranker:
+            print("Loading cross-encoder reranker: ms-marco-MiniLM-L-12-v2...")
+            self.reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2', device="cuda")
+        else:
+            self.reranker = None
+        
+        # Load generator
+        self.use_generator = use_generator
+        if use_generator:
+            print("Initializing generator...")
+            self.generator = Generator()
+        else:
+            self.generator = None
         
         # HNSW parameters
         self.m = m
@@ -20,6 +42,8 @@ class RAG:
         self.chunks = []  # Store individual chunks with metadata
         self.index = None
         self.bm25 = None
+        self.section_embeddings = None  # Embeddings for sections/headers
+        self.section_list = []  # List of unique sections
         
     def load_data(self, json_path: str):
         print(f"Loading data from {json_path}...")
@@ -48,41 +72,114 @@ class RAG:
         sections = set(doc.get('section') for doc in self.documents if doc.get('section'))
         print(f"Detected {total_headers} headers across {len(sections)} sections")
     
-    def _chunk_text(self, text: str, chunk_size: int = 512, overlap: int = 50) -> List[str]:
+    def _encode_texts(self, texts: List[str], show_progress: bool = False, is_query: bool = False) -> np.ndarray:
+        """Encode texts using SentenceTransformer.
+        
+        Args:
+            texts: List of texts to encode
+            show_progress: Show progress bar
+            is_query: Whether texts are queries (for E5 models, adds 'query: ' prefix)
+        """
+        # Add E5 model prefixes if needed
+        if self.is_e5_model:
+            prefix = "query: " if is_query else "passage: "
+            texts = [prefix + text for text in texts]
+        return self.model.encode(texts, show_progress_bar=show_progress, convert_to_numpy=True)
+    
+    def _chunk_text(self, text: str, chunk_size: int = 512, overlap: int = 50, headers: List[Dict] = None) -> List[str]:
+        """Chunk text while respecting paragraph and section boundaries.
+        
+        Args:
+            text: Text to chunk
+            chunk_size: Target chunk size in words
+            overlap: Overlap size in words
+            headers: List of headers from the page to avoid splitting
+        """
         if not text:
             return []
         
-        # Split by sentences (basic approach)
-        sentences = re.split(r'(?<=[.!?])\s+', text)
+        # First split by double newlines (paragraphs) or single newlines
+        paragraphs = re.split(r'\n\n+', text)
+        if len(paragraphs) == 1:
+            # If no double newlines, try single newlines
+            paragraphs = re.split(r'\n+', text)
         
+        # Further split paragraphs into sentences
+        segments = []
+        header_texts = {h.get('text', '').strip() for h in (headers or [])} if headers else set()
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            
+            # Check if this paragraph is a header - keep it intact
+            is_header = para in header_texts or (
+                len(para.split()) <= 15 and 
+                para[0].isupper() and 
+                not para.endswith(('.', '!', '?'))
+            )
+            
+            if is_header:
+                segments.append({'text': para, 'type': 'header'})
+            else:
+                # Split paragraph into sentences
+                sentences = re.split(r'(?<=[.!?])\s+', para)
+                for sent in sentences:
+                    if sent.strip():
+                        segments.append({'text': sent.strip(), 'type': 'sentence'})
+        
+        # Build chunks respecting boundaries
         chunks = []
         current_chunk = []
         current_length = 0
+        last_was_header = False
         
-        for sentence in sentences:
-            sentence_length = len(sentence.split())
+        for i, segment in enumerate(segments):
+            segment_text = segment['text']
+            segment_length = len(segment_text.split())
+            is_header = segment['type'] == 'header'
             
-            if current_length + sentence_length > chunk_size and current_chunk:
+            # Check if we should start a new chunk
+            should_split = False
+            
+            if current_length + segment_length > chunk_size and current_chunk:
+                # Don't split right before a header - save it for next chunk
+                if is_header:
+                    should_split = True
+                # Don't split if current chunk is too small
+                elif current_length >= chunk_size * 0.5:
+                    should_split = True
+                # If adding this would make chunk too large, split
+                elif current_length + segment_length > chunk_size * 1.5:
+                    should_split = True
+            
+            if should_split:
                 # Save current chunk
                 chunks.append(' '.join(current_chunk))
                 
-                # Start new chunk with overlap
-                if overlap > 0 and len(current_chunk) > 1:
-                    # Keep last few sentences for overlap
-                    overlap_text = ' '.join(current_chunk[-2:])
-                    overlap_words = len(overlap_text.split())
-                    if overlap_words <= overlap:
-                        current_chunk = current_chunk[-2:]
-                        current_length = overlap_words
-                    else:
-                        current_chunk = []
-                        current_length = 0
+                # Start new chunk with overlap (only if not starting with header)
+                if overlap > 0 and not is_header and len(current_chunk) > 0:
+                    # Calculate how many sentences to keep for overlap
+                    overlap_sents = []
+                    overlap_words = 0
+                    for sent in reversed(current_chunk):
+                        sent_words = len(sent.split())
+                        if overlap_words + sent_words <= overlap:
+                            overlap_sents.insert(0, sent)
+                            overlap_words += sent_words
+                        else:
+                            break
+                    current_chunk = overlap_sents
+                    current_length = overlap_words
                 else:
                     current_chunk = []
                     current_length = 0
             
-            current_chunk.append(sentence)
-            current_length += sentence_length
+            # Add segment to current chunk
+            current_chunk.append(segment_text)
+            current_length += segment_length
+            last_was_header = is_header
         
         # Add remaining chunk
         if current_chunk:
@@ -108,17 +205,13 @@ class RAG:
             if use_summary and 'summary' in doc and doc['summary']:
                 chunks = [doc['summary']]
             elif 'content' in doc and doc['content']:
-                chunks = self._chunk_text(doc['content'], chunk_size, overlap)
+                chunks = self._chunk_text(doc['content'], chunk_size, overlap, headers)
             else:
                 chunks = [f"Page {page_num}"]
             
             for chunk_idx, chunk_text in enumerate(chunks):
-                # Prepend hierarchy context to chunk for embedding
-                chunk_with_context = hierarchy_context + chunk_text
-                
                 self.chunks.append({
-                    'text': chunk_with_context,  # Text WITH context for embedding
-                    'original_text': chunk_text,  # Original text without context for display
+                    'text': chunk_text,  # Use original text for embedding (no hierarchy prepending)
                     'hierarchy_context': hierarchy_context,
                     'doc_idx': doc_idx,
                     'chunk_idx': chunk_idx,
@@ -135,7 +228,7 @@ class RAG:
         # Generate embeddings for all chunks
         print("Generating embeddings...")
         texts = [chunk['text'] for chunk in self.chunks]
-        embeddings = self.model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
+        embeddings = self._encode_texts(texts, show_progress=True)
         
         # Normalize embeddings for cosine similarity
         print("Normalizing embeddings for cosine similarity...")
@@ -156,7 +249,104 @@ class RAG:
         self.bm25 = BM25Okapi(tokenized_corpus)
         print("BM25 index built")
         
-    def search(self, query: str, top_k: int = 5, ef_search: int = 50) -> List[Dict]:
+        # Build section embeddings for semantic section matching
+        print("Building section embeddings...")
+        sections_set = set()
+        for chunk in self.chunks:
+            if chunk.get('section'):
+                sections_set.add(chunk['section'])
+            # Also add header texts
+            for header in chunk.get('headers', []):
+                if header.get('text'):
+                    sections_set.add(header['text'])
+        
+        self.section_list = list(sections_set)
+        if self.section_list:
+            self.section_embeddings = self._encode_texts(self.section_list, show_progress=False)
+            faiss.normalize_L2(self.section_embeddings)
+            print(f"Embedded {len(self.section_list)} unique sections/headers")
+        else:
+            self.section_embeddings = None
+            print("No sections found to embed")
+    
+    def _compute_section_boost(self, query_emb: np.ndarray, chunk: Dict) -> float:
+        """Compute semantic similarity boost based on section/header relevance.
+        
+        Args:
+            query_emb: Pre-computed normalized query embedding
+            chunk: Chunk dictionary with section/headers
+        """
+        if self.section_embeddings is None or not self.section_list:
+            return 0.0
+        
+        # Find best matching section for this chunk
+        max_similarity = 0.0
+        
+        # Check chunk's section
+        if chunk.get('section') and chunk['section'] in self.section_list:
+            section_idx = self.section_list.index(chunk['section'])
+            section_emb = self.section_embeddings[section_idx:section_idx+1]
+            similarity = float((query_emb @ section_emb.T)[0][0])
+            max_similarity = max(max_similarity, similarity)
+        
+        # Check chunk's headers
+        for header in chunk.get('headers', []):
+            header_text = header.get('text')
+            if header_text and header_text in self.section_list:
+                header_idx = self.section_list.index(header_text)
+                header_emb = self.section_embeddings[header_idx:header_idx+1]
+                similarity = float((query_emb @ header_emb.T)[0][0])
+                max_similarity = max(max_similarity, similarity)
+        
+        return max_similarity
+    
+    def rerank(self, query: str, results: List[Dict], top_k: int = 3) -> List[Dict]:
+        """Rerank results using cross-encoder and add section semantic boost"""
+        if not results:
+            return []
+        
+        # Compute query embedding once for section boost
+        query_emb = None
+        if self.section_embeddings is not None:
+            query_emb = self._encode_texts([query], show_progress=False, is_query=True)
+            faiss.normalize_L2(query_emb)
+        
+        if self.reranker:
+            # Prepare query-document pairs for reranker
+            pairs = [[query, r['chunk']] for r in results]
+            
+            # Get reranker scores
+            rerank_scores = self.reranker.predict(pairs)
+            
+            # Add rerank scores and section boost
+            for i, result in enumerate(results):
+                result['rerank_score'] = float(rerank_scores[i])
+                # Add section semantic boost
+                if query_emb is not None:
+                    section_boost = self._compute_section_boost(query_emb, result)
+                    result['section_boost'] = section_boost
+                    result['final_score'] = result['rerank_score'] + (section_boost * 2.0)
+                else:
+                    result['section_boost'] = 0.0
+                    result['final_score'] = result['rerank_score']
+            
+            reranked = sorted(results, key=lambda x: x['final_score'], reverse=True)
+        else:
+            # No reranker, just use section boost if available
+            for result in results:
+                if query_emb is not None:
+                    section_boost = self._compute_section_boost(query_emb, result)
+                    result['section_boost'] = section_boost
+                    result['final_score'] = section_boost
+                else:
+                    result['section_boost'] = 0.0
+                    result['final_score'] = 0.0
+            
+            reranked = sorted(results, key=lambda x: x['final_score'], reverse=True)
+        
+        return reranked[:top_k]
+        
+    def search(self, query: str, top_k: int = 5, ef_search: int = 50, use_reranker: bool = True) -> List[Dict]:
         """
         Search for relevant chunks given a query using cosine similarity.
         
@@ -171,15 +361,18 @@ class RAG:
         if self.index is None:
             raise ValueError("Index not built. Call build_index() first.")
         
+        # Get more candidates if using reranker
+        retrieve_k = top_k * 4 if use_reranker and self.reranker else top_k
+        
         # Set search parameter
         self.index.hnsw.efSearch = ef_search
         
         # Generate and normalize query embedding
-        query_embedding = self.model.encode([query], convert_to_numpy=True).astype('float32')
+        query_embedding = self._encode_texts([query], show_progress=False, is_query=True)
         faiss.normalize_L2(query_embedding)
         
         # Search (with normalized vectors, L2 distance corresponds to cosine similarity)
-        distances, indices = self.index.search(query_embedding, top_k)
+        distances, indices = self.index.search(query_embedding, retrieve_k)
         
         # Format results
         results = []
@@ -190,8 +383,8 @@ class RAG:
                 
                 cosine_similarity = 1 - (dist ** 2) / 2
                 
-                # Use original text for display (without hierarchy context)
-                display_text = chunk.get('original_text', chunk['text'])
+                # Use chunk text for display
+                display_text = chunk['text']
                 
                 result = {
                     'rank': i + 1,
@@ -208,16 +401,23 @@ class RAG:
                 }
                 results.append(result)
         
+        # Rerank if enabled
+        if use_reranker and self.reranker:
+            results = self.rerank(query, results, top_k)
+        
         return results
     
-    def search_bm25(self, query: str, top_k: int = 5) -> List[Dict]:
+    def search_bm25(self, query: str, top_k: int = 5, use_reranker: bool = True) -> List[Dict]:
         """Search using BM25 algorithm."""
         if self.bm25 is None:
             raise ValueError("BM25 index not built. Call build_index() first.")
         
+        # Get more candidates if using reranker
+        retrieve_k = top_k * 4 if use_reranker and self.reranker else top_k
+        
         tokenized_query = query.lower().split()
         scores = self.bm25.get_scores(tokenized_query)
-        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:retrieve_k]
         
         results = []
         for i, idx in enumerate(top_indices):
@@ -242,7 +442,86 @@ class RAG:
                 }
                 results.append(result)
         
+        # Rerank if enabled
+        if use_reranker and self.reranker:
+            results = self.rerank(query, results, top_k)
+        
         return results
+    
+    def search_hybrid(self, query, top_k=10, candidates_per_method=50, use_reranker=True, emb_weight=0.5, bm25_weight=0.5):
+        """Hybrid search combining BM25 and embedding results with score normalization.
+        
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            candidates_per_method: Number of candidates from each method
+            use_reranker: Whether to use cross-encoder reranking
+            emb_weight: Weight for embedding scores (default 0.5)
+            bm25_weight: Weight for BM25 scores (default 0.5)
+        """
+        # Get candidates from both methods (without reranking yet)
+        emb_results = self.search(query, top_k=candidates_per_method, ef_search=100, use_reranker=False)
+        bm25_results = self.search_bm25(query, top_k=candidates_per_method, use_reranker=False)
+        
+        # Normalize scores using min-max normalization
+        def normalize_scores(results, score_key):
+            if not results:
+                return results
+            scores = [r[score_key] for r in results]
+            min_score = min(scores)
+            max_score = max(scores)
+            score_range = max_score - min_score
+            
+            for r in results:
+                if score_range > 0:
+                    r[f'{score_key}_normalized'] = (r[score_key] - min_score) / score_range
+                else:
+                    r[f'{score_key}_normalized'] = 1.0
+            return results
+        
+        emb_results = normalize_scores(emb_results, 'cosine_similarity')
+        bm25_results = normalize_scores(bm25_results, 'bm25_score')
+        
+        # Combine and remove duplicates based on page + chunk position
+        seen = {}
+        combined = []
+        
+        # Process embedding results first
+        for r in emb_results:
+            key = (r['page'], r['chunk'][:100])
+            if key not in seen:
+                seen[key] = r
+                r['hybrid_score'] = r['cosine_similarity_normalized'] * emb_weight
+                r['chunk_id'] = key
+                combined.append(r)
+        
+        # Add or update with BM25 results
+        for r in bm25_results:
+            key = (r['page'], r['chunk'][:100])
+            if key in seen:
+                # Update existing result with BM25 score
+                existing = seen[key]
+                existing['bm25_score'] = r['bm25_score']
+                existing['bm25_score_normalized'] = r['bm25_score_normalized']
+                existing['hybrid_score'] += r['bm25_score_normalized'] * bm25_weight
+            else:
+                # New result from BM25 only
+                seen[key] = r
+                r['hybrid_score'] = r['bm25_score_normalized'] * bm25_weight
+                r['chunk_id'] = key
+                combined.append(r)
+        
+        # Sort by hybrid score
+        combined = sorted(combined, key=lambda x: x['hybrid_score'], reverse=True)
+        
+        # Rerank the combined results if enabled
+        if use_reranker and self.reranker:
+            return self.rerank(query, combined, top_k)
+        else:
+            # Update ranks
+            for i, r in enumerate(combined[:top_k]):
+                r['rank'] = i + 1
+            return combined[:top_k]
     
     def save_index(self, path: str = 'faiss_hnsw.index'):
         """Save the FAISS index to disk."""
@@ -255,3 +534,29 @@ class RAG:
         """Load a FAISS index from disk."""
         self.index = faiss.read_index(path)
         print(f"Index loaded from {path} with {self.index.ntotal} vectors")
+    
+    def answer(self, query: str, search_method: str = 'hybrid', top_k: int = 8) -> str:
+        """Generate answer using retrieval and LLM with conversation context"""
+        if not self.use_generator or self.generator is None:
+            raise ValueError("Generator not initialized. Set use_generator=True")
+        
+        if search_method == 'hybrid':
+            chunks = self.search_hybrid(query, top_k=top_k, use_reranker=True)
+        elif search_method == 'bm25':
+            chunks = self.search_bm25(query, top_k=top_k, use_reranker=True)
+        else:
+            chunks = self.search(query, top_k=top_k, use_reranker=True)
+        
+        print(f"\n[Retrieved {len(chunks)} chunks via {search_method}]")
+        result = self.generator.generate(query, chunks)
+        
+        print("\nSources:")
+        for i, src in enumerate(result['sources'][:5], 1):
+            print(f"  {i}. {src['pdf']} - Page {src['page']}")
+        
+        return result['answer']
+    
+    def clear_conversation(self):
+        """Clear conversation history"""
+        if self.generator:
+            self.generator.clear_history()

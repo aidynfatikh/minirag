@@ -1,6 +1,7 @@
 # Generated data
 parsed_data/
 vdb.index
+.env
 
 # PDFs
 pdfs/
