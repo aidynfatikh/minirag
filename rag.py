@@ -44,28 +44,85 @@ class RAG:
         self.bm25 = None
         self.section_embeddings = None  # Embeddings for sections/headers
         self.section_list = []  # List of unique sections
+        self.indexed_pdfs = {}  # Track PDFs: {pdf_name: {company, pages, chunks}}
         
-    def load_data(self, json_path: str):
-        print(f"Loading data from {json_path}...")
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+    def load_data(self, json_paths):
+        """Load data from one or multiple JSON files"""
+        if isinstance(json_paths, str):
+            json_paths = [json_paths]
         
-        pdf_name = data.get('pdf_name', 'unknown')
-        pages = data.get('pages', [])
+        print(f"Loading data from {len(json_paths)} file(s)...")
+        for json_path in json_paths:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            pdf_name = data.get('pdf_name', 'unknown')
+            pages = data.get('pages', [])
+            
+            # Extract company from metadata with improved detection
+            company = data.get('company', 'Unknown')
+            if not company or company == 'Unknown':
+                # Try to extract from first page content
+                if pages and 'text' in pages[0]:
+                    first_text = pages[0]['text']
+                    
+                    # Look for common company patterns in first 15 lines
+                    lines = first_text.split('\n')[:15]
+                    for line in lines:
+                        line = line.strip()
+                        line_upper = line.upper()
+                        
+                        # Check for company indicators
+                        if any(word in line_upper for word in ['CORPORATION', 'COMPANY', 'INC.', 'INC', 'LTD', 'GROUP', 'CO.']):
+                            # Common company name patterns
+                            if 'SEIKO EPSON CORPORATION' in line_upper:
+                                company = 'Epson'
+                                break
+                            elif 'ANNUAL REPORT' not in line_upper and len(line) < 100:
+                                # Clean the company name
+                                company = line.replace('CORPORATION', '').replace('COMPANY', '')
+                                company = company.replace('INC.', '').replace('INC', '')
+                                company = company.replace('LTD.', '').replace('LTD', '')
+                                company = company.strip()
+                                if len(company) > 2 and len(company) < 60:
+                                    break
+                    
+                    # Try metadata section/headers if still Unknown
+                    if company == 'Unknown' and pages[0].get('metadata', {}).get('headers'):
+                        headers = pages[0]['metadata']['headers']
+                        for header in headers[:3]:  # Check first 3 headers
+                            text = header.get('text', '').strip()
+                            if any(word in text.upper() for word in ['CORPORATION', 'COMPANY', 'INC', 'GROUP']):
+                                company = text
+                                break
+            
+            # Track this PDF
+            doc_start_idx = len(self.documents)
+            
+            for page in pages:
+                self.documents.append({
+                    'pdf_name': pdf_name,
+                    'company': company,
+                    'page': page['page'],
+                    'content': page['text'],
+                    'word_count': len(page['text'].split()),
+                    'hierarchy_path': page.get('hierarchy_path', []),
+                    'hierarchy_context': page.get('hierarchy_context', ''),
+                    'metadata': page.get('metadata', {}),
+                    'headers': page.get('metadata', {}).get('headers', []),
+                    'section': page.get('metadata', {}).get('section', None)
+                })
+            
+            self.indexed_pdfs[pdf_name] = {
+                'company': company,
+                'pages': len(pages),
+                'doc_indices': (doc_start_idx, len(self.documents)),
+                'path': json_path
+            }
+            
+            print(f"  ✓ {pdf_name}: {len(pages)} pages (Company: {company})")
         
-        self.documents = [{
-            'pdf_name': pdf_name,
-            'page': page['page'],
-            'content': page['text'],
-            'word_count': len(page['text'].split()),
-            'hierarchy_path': page.get('hierarchy_path', []),
-            'hierarchy_context': page.get('hierarchy_context', ''),
-            'metadata': page.get('metadata', {}),
-            'headers': page.get('metadata', {}).get('headers', []),
-            'section': page.get('metadata', {}).get('section', None)
-        } for page in pages]
-        
-        print(f"Loaded {len(self.documents)} pages from {pdf_name}")
+        print(f"\nTotal loaded: {len(self.documents)} pages from {len(self.indexed_pdfs)} PDFs")
         
         # Print summary of detected headers
         total_headers = sum(len(doc.get('headers', [])) for doc in self.documents)
@@ -216,6 +273,7 @@ class RAG:
                     'doc_idx': doc_idx,
                     'chunk_idx': chunk_idx,
                     'pdf_name': pdf_name,
+                    'company': doc.get('company', 'Unknown'),
                     'page': page_num,
                     'total_chunks': len(chunks),
                     'section': section,
@@ -346,51 +404,42 @@ class RAG:
         
         return reranked[:top_k]
         
-    def search(self, query: str, top_k: int = 5, ef_search: int = 50, use_reranker: bool = True) -> List[Dict]:
-        """
-        Search for relevant chunks given a query using cosine similarity.
-        
-        Args:
-            query: Search query string
-            top_k: Number of top results to return
-            ef_search: Size of the dynamic candidate list during search
-            
-        Returns:
-            List of dictionaries containing search results with cosine similarity scores
-        """
+    def search(self, query: str, top_k: int = 5, ef_search: int = 50, use_reranker: bool = True, company_filter: Optional[str] = None) -> List[Dict]:
+        """Search for relevant chunks using cosine similarity with optional company filter"""
         if self.index is None:
             raise ValueError("Index not built. Call build_index() first.")
         
-        # Get more candidates if using reranker
+        # Get more candidates if using reranker or filtering
         retrieve_k = top_k * 4 if use_reranker and self.reranker else top_k
+        if company_filter:
+            retrieve_k = min(retrieve_k * 3, len(self.chunks))  # Get more candidates for filtering
         
-        # Set search parameter
         self.index.hnsw.efSearch = ef_search
         
-        # Generate and normalize query embedding
         query_embedding = self._encode_texts([query], show_progress=False, is_query=True)
         faiss.normalize_L2(query_embedding)
         
-        # Search (with normalized vectors, L2 distance corresponds to cosine similarity)
         distances, indices = self.index.search(query_embedding, retrieve_k)
         
-        # Format results
         results = []
         for i, (dist, idx) in enumerate(zip(distances[0], indices[0])):
             if idx < len(self.chunks):
                 chunk = self.chunks[idx]
+                
+                # Apply company filter
+                if company_filter and chunk.get('company') != company_filter:
+                    continue
+                
                 doc = self.documents[chunk['doc_idx']]
-                
                 cosine_similarity = 1 - (dist ** 2) / 2
-                
-                # Use chunk text for display
                 display_text = chunk['text']
                 
                 result = {
-                    'rank': i + 1,
+                    'rank': len(results) + 1,
                     'cosine_similarity': float(cosine_similarity),
                     'l2_distance': float(dist),
                     'pdf_name': chunk['pdf_name'],
+                    'company': chunk.get('company', 'Unknown'),
                     'page': chunk['page'],
                     'chunk': display_text[:500] + '...' if len(display_text) > 500 else display_text,
                     'chunk_info': f"{chunk['chunk_idx'] + 1}/{chunk['total_chunks']}",
@@ -400,38 +449,49 @@ class RAG:
                     'hierarchy': chunk.get('hierarchy_context', '')
                 }
                 results.append(result)
+                
+                # Stop if we have enough results
+                if len(results) >= retrieve_k:
+                    break
         
-        # Rerank if enabled
         if use_reranker and self.reranker:
             results = self.rerank(query, results, top_k)
+        else:
+            results = results[:top_k]
         
         return results
     
-    def search_bm25(self, query: str, top_k: int = 5, use_reranker: bool = True) -> List[Dict]:
-        """Search using BM25 algorithm."""
+    def search_bm25(self, query: str, top_k: int = 5, use_reranker: bool = True, company_filter: Optional[str] = None) -> List[Dict]:
+        """Search using BM25 algorithm with optional company filter."""
         if self.bm25 is None:
             raise ValueError("BM25 index not built. Call build_index() first.")
         
-        # Get more candidates if using reranker
+        # Get more candidates if using reranker or filtering
         retrieve_k = top_k * 4 if use_reranker and self.reranker else top_k
+        if company_filter:
+            retrieve_k = min(retrieve_k * 3, len(self.chunks))  # Get more candidates for filtering
         
         tokenized_query = query.lower().split()
         scores = self.bm25.get_scores(tokenized_query)
-        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:retrieve_k]
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
         
         results = []
-        for i, idx in enumerate(top_indices):
+        for idx in top_indices:
             if idx < len(self.chunks):
                 chunk = self.chunks[idx]
-                doc = self.documents[chunk['doc_idx']]
                 
-                # Use original text for display
-                display_text = chunk.get('original_text', chunk['text'])
+                # Apply company filter
+                if company_filter and chunk.get('company') != company_filter:
+                    continue
+                
+                doc = self.documents[chunk['doc_idx']]
+                display_text = chunk['text']
                 
                 result = {
-                    'rank': i + 1,
+                    'rank': len(results) + 1,
                     'bm25_score': float(scores[idx]),
                     'pdf_name': chunk['pdf_name'],
+                    'company': chunk.get('company', 'Unknown'),
                     'page': chunk['page'],
                     'chunk': display_text[:500] + '...' if len(display_text) > 500 else display_text,
                     'chunk_info': f"{chunk['chunk_idx'] + 1}/{chunk['total_chunks']}",
@@ -441,27 +501,30 @@ class RAG:
                     'hierarchy': chunk.get('hierarchy_context', '')
                 }
                 results.append(result)
+                
+                # Stop if we have enough results
+                if len(results) >= retrieve_k:
+                    break
         
         # Rerank if enabled
         if use_reranker and self.reranker:
-            results = self.rerank(query, results, top_k)
-        
-        return results
+            return self.rerank(query, results, top_k)
+        else:
+            return results[:top_k]
     
-    def search_hybrid(self, query, top_k=10, candidates_per_method=50, use_reranker=True, emb_weight=0.5, bm25_weight=0.5):
-        """Hybrid search combining BM25 and embedding results with score normalization.
+    def search_hybrid(self, query: str, top_k: int = 5, candidates_per_method: int = 20, emb_weight: float = 0.5, bm25_weight: float = 0.5, use_reranker: bool = True, company_filter: Optional[str] = None) -> List[Dict]:
+        """Hybrid search combining BM25 and embedding with optional company filter
         
         Args:
             query: Search query
-            top_k: Number of results to return
+            top_k: Number of final results
             candidates_per_method: Number of candidates from each method
-            use_reranker: Whether to use cross-encoder reranking
             emb_weight: Weight for embedding scores (default 0.5)
             bm25_weight: Weight for BM25 scores (default 0.5)
         """
         # Get candidates from both methods (without reranking yet)
-        emb_results = self.search(query, top_k=candidates_per_method, ef_search=100, use_reranker=False)
-        bm25_results = self.search_bm25(query, top_k=candidates_per_method, use_reranker=False)
+        emb_results = self.search(query, top_k=candidates_per_method, ef_search=100, use_reranker=False, company_filter=company_filter)
+        bm25_results = self.search_bm25(query, top_k=candidates_per_method, use_reranker=False, company_filter=company_filter)
         
         # Normalize scores using min-max normalization
         def normalize_scores(results, score_key):
@@ -535,24 +598,44 @@ class RAG:
         self.index = faiss.read_index(path)
         print(f"Index loaded from {path} with {self.index.ntotal} vectors")
     
-    def answer(self, query: str, search_method: str = 'hybrid', top_k: int = 8) -> str:
-        """Generate answer using retrieval and LLM with conversation context"""
+    def answer(self, query: str, search_method: str = 'hybrid', top_k: int = 8, 
+               company_filter: Optional[str] = None, auto_detect_company: bool = False) -> str:
+        """Generate answer using retrieval and LLM with conversation context
+        
+        Args:
+            query: User query
+            search_method: 'hybrid', 'bm25', or 'semantic'
+            top_k: Number of chunks to retrieve
+            company_filter: Explicit company filter (overrides auto-detection)
+            auto_detect_company: Whether to auto-detect company from query
+        """
         if not self.use_generator or self.generator is None:
             raise ValueError("Generator not initialized. Set use_generator=True")
         
-        if search_method == 'hybrid':
-            chunks = self.search_hybrid(query, top_k=top_k, use_reranker=True)
-        elif search_method == 'bm25':
-            chunks = self.search_bm25(query, top_k=top_k, use_reranker=True)
-        else:
-            chunks = self.search(query, top_k=top_k, use_reranker=True)
+        # Auto-detect company if enabled and no explicit filter
+        if auto_detect_company and not company_filter:
+            detected_company = self.detect_company_in_query(query)
+            if detected_company:
+                company_filter = detected_company
+                print(f"[Auto-detected company filter: {detected_company}]")
         
-        print(f"\n[Retrieved {len(chunks)} chunks via {search_method}]")
+        if search_method == 'hybrid':
+            chunks = self.search_hybrid(query, top_k=top_k, use_reranker=True, company_filter=company_filter)
+        elif search_method == 'bm25':
+            chunks = self.search_bm25(query, top_k=top_k, use_reranker=True, company_filter=company_filter)
+        else:
+            chunks = self.search(query, top_k=top_k, use_reranker=True, company_filter=company_filter)
+        
+        if not chunks:
+            return f"No relevant information found{f' for {company_filter}' if company_filter else ''}."
+        
+        filter_msg = f" from {company_filter}" if company_filter else ""
+        print(f"\n[Retrieved {len(chunks)} chunks{filter_msg} via {search_method}]")
         result = self.generator.generate(query, chunks)
         
         print("\nSources:")
         for i, src in enumerate(result['sources'][:5], 1):
-            print(f"  {i}. {src['pdf']} - Page {src['page']}")
+            print(f"  {i}. {src['pdf']} - Page {src['page']} ({src.get('company', 'N/A')})")
         
         return result['answer']
     
@@ -560,3 +643,78 @@ class RAG:
         """Clear conversation history"""
         if self.generator:
             self.generator.clear_history()
+    
+    def get_indexed_pdfs(self) -> Dict[str, Dict]:
+        """Get information about indexed PDFs"""
+        return self.indexed_pdfs
+    
+    def get_companies(self) -> List[str]:
+        """Get list of all unique companies in the indexed data"""
+        companies = set()
+        for info in self.indexed_pdfs.values():
+            companies.add(info['company'])
+        return sorted(list(companies))
+    
+    def detect_company_in_query(self, query: str) -> Optional[str]:
+        """Detect company name mentioned in query
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            Company name if detected, None otherwise
+        """
+        companies = self.get_companies()
+        query_lower = query.lower()
+        
+        # Check for exact matches (case-insensitive)
+        for company in companies:
+            if company.lower() in query_lower:
+                return company
+        
+        # Check for partial matches (e.g., "Epson" in "Seiko Epson")
+        for company in companies:
+            company_words = company.lower().split()
+            for word in company_words:
+                if len(word) > 3 and word in query_lower:
+                    return company
+        
+        return None
+    
+    def search_with_auto_filter(self, query: str, top_k: int = 5, 
+                                search_method: str = 'hybrid',
+                                use_reranker: bool = True) -> List[Dict]:
+        """Search with automatic company detection from query
+        
+        Args:
+            query: User query
+            top_k: Number of results to return
+            search_method: 'hybrid', 'bm25', or 'semantic'
+            use_reranker: Whether to use reranker
+            
+        Returns:
+            List of search results with detected company info
+        """
+        # Try to detect company from query
+        detected_company = self.detect_company_in_query(query)
+        
+        if detected_company:
+            print(f"[Auto-detected company filter: {detected_company}]")
+        
+        # Perform search with detected filter
+        if search_method == 'hybrid':
+            results = self.search_hybrid(query, top_k=top_k, use_reranker=use_reranker, 
+                                        company_filter=detected_company)
+        elif search_method == 'bm25':
+            results = self.search_bm25(query, top_k=top_k, use_reranker=use_reranker,
+                                      company_filter=detected_company)
+        else:
+            results = self.search(query, top_k=top_k, use_reranker=use_reranker,
+                                 company_filter=detected_company)
+        
+        # Add detection info to results
+        for result in results:
+            result['auto_filtered'] = detected_company is not None
+            result['detected_company'] = detected_company
+        
+        return results

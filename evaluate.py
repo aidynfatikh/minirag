@@ -3,7 +3,7 @@
 
 import random
 from rag import RAG
-from pathlib import Path
+import os
 
 TEST_CASES = [
     {"id": 1, "query": "What is Epson's environmental vision for 2050?", "pages": [34, 35]},
@@ -95,8 +95,6 @@ def evaluate(rag, method='embedding', top_k=10, use_reranker=True, candidates_pe
         })
     
     # Calculate averages
-    avg_p = sum(r['precision'] for r in results) / len(results)
-    avg_r = sum(r['recall'] for r in results) / len(results)
     avg_f1 = sum(r['f1'] for r in results) / len(results)
     avg_r1 = sum(r['recall_at_1'] for r in results) / len(results)
     avg_r3 = sum(r['recall_at_3'] for r in results) / len(results)
@@ -130,7 +128,9 @@ def main():
     print("Loading RAG system with E5-large-v2 embeddings...")
     rag = RAG(model_name='intfloat/e5-large-v2', m=32, ef_construction=256, use_reranker=True)
     rag.load_data("parsed_data/6d76ccb75bbf1b27ca60b8419c5343ac050cebb0.json")
-    rag.build_index(chunk_size=256, overlap=32)
+
+    if not os.path.exists("vdb.index"):
+        rag.build_index(chunk_size=256, overlap=32)
     
     print("\n" + "="*100)
     print("EVALUATING: HYBRID SEARCH (BM25 + Embedding + Reranker)")

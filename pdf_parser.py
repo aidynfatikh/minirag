@@ -148,7 +148,12 @@ def parse_pdf(pdf_path):
     hierarchy = HierarchyTracker()
     
     for page_num, page in enumerate(doc, 1):
-        text = page.get_text().strip()
+        # Use "text" layout option for better text extraction with proper spacing
+        text = page.get_text("text").strip()
+        
+        # Fallback to dict method if text is empty
+        if not text:
+            text = page.get_text().strip()
         
         # Detect headers and sections
         blocks_with_metadata = detect_headers_and_sections(page, page_num)
@@ -156,7 +161,7 @@ def parse_pdf(pdf_path):
         # Extract headers for this page and update hierarchy
         headers = []
         for block in blocks_with_metadata:
-            if block['is_header']:
+            if block.get('is_header'):
                 headers.append({
                     'text': block['text'],
                     'level': block['header_level'],
@@ -170,20 +175,21 @@ def parse_pdf(pdf_path):
         hierarchy_path = hierarchy.get_path()
         hierarchy_context = hierarchy.format_context()
         
-        if text:
-            pages_data.append({
-                'page': page_num,
-                'text': text,
-                'hierarchy_path': hierarchy_path,
-                'hierarchy_context': hierarchy_context,
-                'metadata': {
-                    'headers': headers,
-                    'section': hierarchy_path[-1] if hierarchy_path else None,
-                    'num_headers': len(headers),
-                    'has_bold': any(b['is_bold'] for b in blocks_with_metadata),
-                    'has_italic': any(b['is_italic'] for b in blocks_with_metadata)
-                }
-            })
+        # Always add page, even if text is empty (might be image-only page)
+        pages_data.append({
+            'page': page_num,
+            'text': text if text else f"[Page {page_num} - No extractable text]",
+            'hierarchy_path': hierarchy_path,
+            'hierarchy_context': hierarchy_context,
+            'metadata': {
+                'headers': headers,
+                'section': hierarchy_path[-1] if hierarchy_path else None,
+                'num_headers': len(headers),
+                'has_bold': any(b.get('is_bold', False) for b in blocks_with_metadata),
+                'has_italic': any(b.get('is_italic', False) for b in blocks_with_metadata),
+                'has_text': bool(text)
+            }
+        })
     
     doc.close()
     return pages_data
@@ -214,15 +220,12 @@ if __name__ == "__main__":
     pdf_files = list(pdfs_dir.glob("*.pdf"))
     
     if pdf_files:
-        test_pdf = pdf_files[0]
-        print(f"Parsing: {test_pdf.name}")
-        
-        output_path = process_pdf(test_pdf, output_dir)
-        text = output_path.read_text(encoding="utf-8")
-        
-        print(f"Saved to: {output_path}")
-        print(f"Extracted {len(text)} characters")
-        print("=" * 80)
-        print(text[:500] + "..." if len(text) > 500 else text)
+        for file in pdf_files:
+            print(f"Parsing: {file.name}")
+            
+            output_path = process_pdf(file, output_dir)
+            text = output_path.read_text(encoding="utf-8")
     else:
         print("No PDF files found in pdfs/ directory")
+    
+    print("Done parsing")

@@ -35,6 +35,29 @@ class Generator:
         self.model.eval()
         print(f"Model loaded")
     
+    def cleanup(self):
+        """Clean up model and free GPU memory"""
+        try:
+            if hasattr(self, 'model') and self.model is not None:
+                del self.model
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                del self.tokenizer
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("Model cleaned up")
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+        return False
+    
+    def __del__(self):
+        self.cleanup()
+    
     def clear_history(self):
         """Clear conversation history"""
         self.conversation_history = []
@@ -109,3 +132,64 @@ class Generator:
                 sources.append({"pdf": c['pdf_name'], "page": c['page']})
         
         return {"answer": answer, "sources": sources}
+    
+    def extract_company_name(self, text: str, max_tokens: int = 30) -> str:
+        """Extract company name from document text using LLM
+        
+        Args:
+            text: First 2 pages of document text
+            max_tokens: Maximum tokens for response
+            
+        Returns:
+            Extracted company name or 'Unknown'
+        """
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": "Extract the company name from the document. Return ONLY the company name, nothing else."
+            },
+            {
+                "role": "user",
+                "content": f"Document:\n{text[:3000]}\n\nCompany name:"
+            }
+        ]
+        
+        prompt = self.tokenizer.apply_chat_template(
+            prompt_messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(self.device)
+        
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                temperature=0.1,  # Low temperature for more deterministic output
+                do_sample=True,
+                top_p=0.9,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+        
+        generated_ids = outputs[0][inputs['input_ids'].shape[1]:]
+        company_name = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        
+        # Clean up the response
+        company_name = company_name.strip('"\'.,')
+        
+        # If response is too long or contains explanation, try to extract just the name
+        if len(company_name) > 100 or '\n' in company_name:
+            lines = company_name.split('\n')
+            company_name = lines[0].strip()
+        
+        # Remove common prefixes/suffixes in responses
+        for phrase in ['The company is ', 'Company name: ', 'Company: ', 'Answer: ']:
+            if company_name.startswith(phrase):
+                company_name = company_name[len(phrase):].strip()
+        
+        # Validate result
+        if not company_name or company_name.lower() in ['none', 'n/a', 'not found', 'unclear', '']:
+            return 'Unknown'
+        
+        return company_name
