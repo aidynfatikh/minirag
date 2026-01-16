@@ -1,27 +1,61 @@
 import faiss
 import json
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import re
 from rank_bm25 import BM25Okapi
 import numpy as np
-from generator import Generator
+from pathlib import Path
 
-class RAG:    
-    def __init__(self, model_name: str = 'intfloat/e5-large-v2', m: int = 32, ef_construction: int = 200, use_reranker: bool = True, use_generator: bool = False):        
-        self.model_name = model_name
-        self.is_e5_model = 'e5-' in model_name.lower()
+from .generator import Generator
+from .config_loader import get_config, Config
+
+class RAG:
+    """Retrieval-Augmented Generation system with hybrid search and reranking"""
+    
+    def __init__(
+        self,
+        config: Optional[Config] = None,
+        model_name: Optional[str] = None,
+        m: Optional[int] = None,
+        ef_construction: Optional[int] = None,
+        use_reranker: Optional[bool] = None,
+        use_generator: bool = False
+    ):
+        """Initialize RAG system
         
-        print(f"Loading embedding model: {model_name}...")
-        self.model = SentenceTransformer(model_name, device="cuda")
+        Args:
+            config: Configuration object (if None, loads from default config file)
+            model_name: Override embedding model name
+            m: Override HNSW M parameter
+            ef_construction: Override HNSW ef_construction parameter
+            use_reranker: Override reranker usage
+            use_generator: Whether to load generator
+        """
+        # Load configuration
+        self.config = config or get_config()
+        
+        # Get model configs
+        emb_config = self.config.models.get('embedding', {})
+        rerank_config = self.config.models.get('reranker', {})
+        
+        # Use provided values or fall back to config
+        self.model_name = model_name or emb_config.get('name', 'intfloat/e5-large-v2')
+        self.is_e5_model = 'e5-' in self.model_name.lower()
+        device = emb_config.get('device', 'cuda')
+        
+        print(f"Loading embedding model: {self.model_name}...")
+        self.model = SentenceTransformer(self.model_name, device=device, local_files_only=True)
         self.embedding_dim = self.model.get_sentence_embedding_dimension()
         print(f"Embedding dimension: {self.embedding_dim}")
         
         # Load reranker
-        self.use_reranker = use_reranker
-        if use_reranker:
-            print("Loading cross-encoder reranker: ms-marco-MiniLM-L-12-v2...")
-            self.reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-12-v2', device="cuda")
+        self.use_reranker = use_reranker if use_reranker is not None else rerank_config.get('enabled', True)
+        if self.use_reranker:
+            reranker_name = rerank_config.get('name', 'cross-encoder/ms-marco-MiniLM-L-12-v2')
+            reranker_device = rerank_config.get('device', 'cuda')
+            print(f"Loading cross-encoder reranker: {reranker_name}...")
+            self.reranker = CrossEncoder(reranker_name, device=reranker_device, local_files_only=True)
         else:
             self.reranker = None
         
@@ -29,13 +63,13 @@ class RAG:
         self.use_generator = use_generator
         if use_generator:
             print("Initializing generator...")
-            self.generator = Generator()
+            self.generator = Generator(config=self.config)
         else:
             self.generator = None
         
         # HNSW parameters
-        self.m = m
-        self.ef_construction = ef_construction
+        self.m = m or self.config.indexing.hnsw.m
+        self.ef_construction = ef_construction or self.config.indexing.hnsw.ef_construction
         
         # Storage for documents and index
         self.documents = []
@@ -44,12 +78,19 @@ class RAG:
         self.bm25 = None
         self.section_embeddings = None  # Embeddings for sections/headers
         self.section_list = []  # List of unique sections
-        self.indexed_pdfs = {}  # Track PDFs: {pdf_name: {company, pages, chunks}}
+        self.indexed_pdfs = {}  # Track PDFs: {pdf_name: {title, pages, chunks}}
         
-    def load_data(self, json_paths):
-        """Load data from one or multiple JSON files"""
+    def load_data(self, json_paths, titles_override: Optional[Dict[str, str]] = None):
+        """Load data from one or multiple JSON files
+        
+        Args:
+            json_paths: Path or list of paths to JSON files
+            titles_override: Optional dict mapping json_path -> title to override titles from files
+        """
         if isinstance(json_paths, str):
             json_paths = [json_paths]
+        
+        titles_override = titles_override or {}
         
         print(f"Loading data from {len(json_paths)} file(s)...")
         for json_path in json_paths:
@@ -59,42 +100,13 @@ class RAG:
             pdf_name = data.get('pdf_name', 'unknown')
             pages = data.get('pages', [])
             
-            # Extract company from metadata with improved detection
-            company = data.get('company', 'Unknown')
-            if not company or company == 'Unknown':
-                # Try to extract from first page content
-                if pages and 'text' in pages[0]:
-                    first_text = pages[0]['text']
-                    
-                    # Look for common company patterns in first 15 lines
-                    lines = first_text.split('\n')[:15]
-                    for line in lines:
-                        line = line.strip()
-                        line_upper = line.upper()
-                        
-                        # Check for company indicators
-                        if any(word in line_upper for word in ['CORPORATION', 'COMPANY', 'INC.', 'INC', 'LTD', 'GROUP', 'CO.']):
-                            # Common company name patterns
-                            if 'SEIKO EPSON CORPORATION' in line_upper:
-                                company = 'Epson'
-                                break
-                            elif 'ANNUAL REPORT' not in line_upper and len(line) < 100:
-                                # Clean the company name
-                                company = line.replace('CORPORATION', '').replace('COMPANY', '')
-                                company = company.replace('INC.', '').replace('INC', '')
-                                company = company.replace('LTD.', '').replace('LTD', '')
-                                company = company.strip()
-                                if len(company) > 2 and len(company) < 60:
-                                    break
-                    
-                    # Try metadata section/headers if still Unknown
-                    if company == 'Unknown' and pages[0].get('metadata', {}).get('headers'):
-                        headers = pages[0]['metadata']['headers']
-                        for header in headers[:3]:  # Check first 3 headers
-                            text = header.get('text', '').strip()
-                            if any(word in text.upper() for word in ['CORPORATION', 'COMPANY', 'INC', 'GROUP']):
-                                company = text
-                                break
+            # Use override title if provided, otherwise extract from metadata
+            if json_path in titles_override:
+                title = titles_override[json_path]
+            elif str(json_path) in titles_override:
+                title = titles_override[str(json_path)]
+            else:
+                title = data.get('title', 'Unknown')
             
             # Track this PDF
             doc_start_idx = len(self.documents)
@@ -102,7 +114,7 @@ class RAG:
             for page in pages:
                 self.documents.append({
                     'pdf_name': pdf_name,
-                    'company': company,
+                    'title': title,
                     'page': page['page'],
                     'content': page['text'],
                     'word_count': len(page['text'].split()),
@@ -114,20 +126,20 @@ class RAG:
                 })
             
             self.indexed_pdfs[pdf_name] = {
-                'company': company,
+                'title': title,
                 'pages': len(pages),
                 'doc_indices': (doc_start_idx, len(self.documents)),
                 'path': json_path
             }
             
-            print(f"  ✓ {pdf_name}: {len(pages)} pages (Company: {company})")
+            print(f"  ✓ {pdf_name}: {len(pages)} pages (Title: {title})")
         
         print(f"\nTotal loaded: {len(self.documents)} pages from {len(self.indexed_pdfs)} PDFs")
         
         # Print summary of detected headers
         total_headers = sum(len(doc.get('headers', [])) for doc in self.documents)
         sections = set(doc.get('section') for doc in self.documents if doc.get('section'))
-        print(f"Detected {total_headers} headers across {len(sections)} sections")
+        print(f"Detected {total_headers} headers across {len(sections)} sections")    
     
     def _encode_texts(self, texts: List[str], show_progress: bool = False, is_query: bool = False) -> np.ndarray:
         """Encode texts using SentenceTransformer.
@@ -143,7 +155,13 @@ class RAG:
             texts = [prefix + text for text in texts]
         return self.model.encode(texts, show_progress_bar=show_progress, convert_to_numpy=True)
     
-    def _chunk_text(self, text: str, chunk_size: int = 512, overlap: int = 50, headers: List[Dict] = None) -> List[str]:
+    def _chunk_text(
+        self,
+        text: str,
+        chunk_size: int = 512,
+        overlap: int = 50,
+        headers: Optional[List[Dict]] = None
+    ) -> List[str]:
         """Chunk text while respecting paragraph and section boundaries.
         
         Args:
@@ -151,14 +169,18 @@ class RAG:
             chunk_size: Target chunk size in words
             overlap: Overlap size in words
             headers: List of headers from the page to avoid splitting
+        
+        Returns:
+            List of text chunks
         """
         if not text:
             return []
         
+        chunk_config = self.config.document_processing.chunking
+        
         # First split by double newlines (paragraphs) or single newlines
         paragraphs = re.split(r'\n\n+', text)
         if len(paragraphs) == 1:
-            # If no double newlines, try single newlines
             paragraphs = re.split(r'\n+', text)
         
         # Further split paragraphs into sentences
@@ -172,7 +194,7 @@ class RAG:
             
             # Check if this paragraph is a header - keep it intact
             is_header = para in header_texts or (
-                len(para.split()) <= 15 and 
+                len(para.split()) <= chunk_config.max_header_words and 
                 para[0].isupper() and 
                 not para.endswith(('.', '!', '?'))
             )
@@ -199,16 +221,18 @@ class RAG:
             
             # Check if we should start a new chunk
             should_split = False
+            min_size = chunk_size * chunk_config.min_chunk_ratio
+            max_size = chunk_size * chunk_config.max_chunk_ratio
             
             if current_length + segment_length > chunk_size and current_chunk:
                 # Don't split right before a header - save it for next chunk
                 if is_header:
                     should_split = True
                 # Don't split if current chunk is too small
-                elif current_length >= chunk_size * 0.5:
+                elif current_length >= min_size:
                     should_split = True
                 # If adding this would make chunk too large, split
-                elif current_length + segment_length > chunk_size * 1.5:
+                elif current_length + segment_length > max_size:
                     should_split = True
             
             if should_split:
@@ -242,11 +266,29 @@ class RAG:
         if current_chunk:
             chunks.append(' '.join(current_chunk))
         
-        return chunks if chunks else [text[:1000]]  # Fallback for short texts
+        # Fallback for short texts
+        return chunks if chunks else [text[:chunk_config.fallback_max_chars]]
+    
+    def _build_chunks(
+        self,
+        use_summary: Optional[bool] = None,
+        chunk_size: Optional[int] = None,
+        overlap: Optional[int] = None
+    ) -> None:
+        """Build chunks from loaded documents (internal helper)
         
-    def build_index(self, use_summary: bool = False, chunk_size: int = 512, overlap: int = 50):
+        Args:
+            use_summary: Use document summaries instead of full text
+            chunk_size: Chunk size in words (uses config default if None)
+            overlap: Overlap size in words (uses config default if None)
+        """
         if not self.documents:
             raise ValueError("No documents loaded. Call load_data() first.")
+        
+        # Use config defaults if not provided
+        use_summary = use_summary if use_summary is not None else self.config.indexing.use_summary
+        chunk_size = chunk_size or self.config.indexing.chunk_size
+        overlap = overlap or self.config.indexing.overlap
         
         print("Chunking documents...")
         self.chunks = []
@@ -273,7 +315,7 @@ class RAG:
                     'doc_idx': doc_idx,
                     'chunk_idx': chunk_idx,
                     'pdf_name': pdf_name,
-                    'company': doc.get('company', 'Unknown'),
+                    'title': doc.get('title', 'Unknown'),
                     'page': page_num,
                     'total_chunks': len(chunks),
                     'section': section,
@@ -282,6 +324,56 @@ class RAG:
                 })
         
         print(f"Created {len(self.chunks)} chunks from {len(self.documents)} documents")
+    
+    def _build_bm25_index(self) -> None:
+        """Build BM25 index from existing chunks"""
+        if not self.chunks:
+            raise ValueError("No chunks available. Call _build_chunks() first.")
+        
+        print("Building BM25 index...")
+        tokenized_corpus = [chunk['text'].lower().split() for chunk in self.chunks]
+        self.bm25 = BM25Okapi(tokenized_corpus)
+        print("BM25 index built")
+    
+    def _build_section_embeddings(self) -> None:
+        """Build section embeddings from existing chunks"""
+        if not self.chunks:
+            raise ValueError("No chunks available. Call _build_chunks() first.")
+        
+        print("Building section embeddings...")
+        sections_set = set()
+        for chunk in self.chunks:
+            if chunk.get('section'):
+                sections_set.add(chunk['section'])
+            # Also add header texts
+            for header in chunk.get('headers', []):
+                if header.get('text'):
+                    sections_set.add(header['text'])
+        
+        self.section_list = list(sections_set)
+        if self.section_list:
+            self.section_embeddings = self._encode_texts(self.section_list, show_progress=False)
+            faiss.normalize_L2(self.section_embeddings)
+            print(f"Embedded {len(self.section_list)} unique sections/headers")
+        else:
+            self.section_embeddings = None
+            print("No sections found to embed")
+        
+    def build_index(
+        self,
+        use_summary: Optional[bool] = None,
+        chunk_size: Optional[int] = None,
+        overlap: Optional[int] = None
+    ) -> None:
+        """Build FAISS index and BM25 index from loaded documents
+        
+        Args:
+            use_summary: Use document summaries instead of full text
+            chunk_size: Chunk size in words (uses config default if None)
+            overlap: Overlap size in words (uses config default if None)
+        """
+        # Build chunks
+        self._build_chunks(use_summary, chunk_size, overlap)
         
         # Generate embeddings for all chunks
         print("Generating embeddings...")
@@ -302,30 +394,10 @@ class RAG:
         print(f"Index built with {self.index.ntotal} vectors")
         
         # Build BM25 index
-        print("Building BM25 index...")
-        tokenized_corpus = [chunk['text'].lower().split() for chunk in self.chunks]
-        self.bm25 = BM25Okapi(tokenized_corpus)
-        print("BM25 index built")
+        self._build_bm25_index()
         
-        # Build section embeddings for semantic section matching
-        print("Building section embeddings...")
-        sections_set = set()
-        for chunk in self.chunks:
-            if chunk.get('section'):
-                sections_set.add(chunk['section'])
-            # Also add header texts
-            for header in chunk.get('headers', []):
-                if header.get('text'):
-                    sections_set.add(header['text'])
-        
-        self.section_list = list(sections_set)
-        if self.section_list:
-            self.section_embeddings = self._encode_texts(self.section_list, show_progress=False)
-            faiss.normalize_L2(self.section_embeddings)
-            print(f"Embedded {len(self.section_list)} unique sections/headers")
-        else:
-            self.section_embeddings = None
-            print("No sections found to embed")
+        # Build section embeddings
+        self._build_section_embeddings()
     
     def _compute_section_boost(self, query_emb: np.ndarray, chunk: Dict) -> float:
         """Compute semantic similarity boost based on section/header relevance.
@@ -333,6 +405,9 @@ class RAG:
         Args:
             query_emb: Pre-computed normalized query embedding
             chunk: Chunk dictionary with section/headers
+        
+        Returns:
+            Section boost score
         """
         if self.section_embeddings is None or not self.section_list:
             return 0.0
@@ -359,9 +434,20 @@ class RAG:
         return max_similarity
     
     def rerank(self, query: str, results: List[Dict], top_k: int = 3) -> List[Dict]:
-        """Rerank results using cross-encoder and add section semantic boost"""
+        """Rerank results using cross-encoder and add section semantic boost
+        
+        Args:
+            query: Search query
+            results: List of search results
+            top_k: Number of top results to return
+        
+        Returns:
+            Reranked list of results
+        """
         if not results:
             return []
+        
+        section_boost_weight = self.config.search.section_boost_weight
         
         # Compute query embedding once for section boost
         query_emb = None
@@ -383,7 +469,7 @@ class RAG:
                 if query_emb is not None:
                     section_boost = self._compute_section_boost(query_emb, result)
                     result['section_boost'] = section_boost
-                    result['final_score'] = result['rerank_score'] + (section_boost * 2.0)
+                    result['final_score'] = result['rerank_score'] + (section_boost * section_boost_weight)
                 else:
                     result['section_boost'] = 0.0
                     result['final_score'] = result['rerank_score']
@@ -404,15 +490,40 @@ class RAG:
         
         return reranked[:top_k]
         
-    def search(self, query: str, top_k: int = 5, ef_search: int = 50, use_reranker: bool = True, company_filter: Optional[str] = None) -> List[Dict]:
-        """Search for relevant chunks using cosine similarity with optional company filter"""
+    def search(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        ef_search: Optional[int] = None,
+        use_reranker: Optional[bool] = None,
+        title_filter: Optional[str] = None
+    ) -> List[Dict]:
+        """Search for relevant chunks using cosine similarity with optional title filter
+        
+        Args:
+            query: Search query
+            top_k: Number of results to return (uses config default if None)
+            ef_search: HNSW ef_search parameter (uses config default if None)
+            use_reranker: Whether to use reranker (uses instance setting if None)
+            title_filter: Filter results by document title
+        
+        Returns:
+            List of search results
+        """
         if self.index is None:
             raise ValueError("Index not built. Call build_index() first.")
         
+        # Use config defaults
+        top_k = top_k or self.config.search.top_k
+        ef_search = ef_search or self.config.indexing.hnsw.ef_search
+        use_reranker = use_reranker if use_reranker is not None else self.use_reranker
+        
         # Get more candidates if using reranker or filtering
-        retrieve_k = top_k * 4 if use_reranker and self.reranker else top_k
-        if company_filter:
-            retrieve_k = min(retrieve_k * 3, len(self.chunks))  # Get more candidates for filtering
+        retrieve_multiplier = self.config.search.retrieve_multiplier
+        retrieve_k = top_k * retrieve_multiplier if use_reranker and self.reranker else top_k
+        if title_filter:
+            filter_mult = self.config.search.company_filter_multiplier
+            retrieve_k = min(retrieve_k * filter_mult, len(self.chunks))
         
         self.index.hnsw.efSearch = ef_search
         
@@ -426,8 +537,8 @@ class RAG:
             if idx < len(self.chunks):
                 chunk = self.chunks[idx]
                 
-                # Apply company filter
-                if company_filter and chunk.get('company') != company_filter:
+                # Apply title filter (fuzzy match - check if filter is substring of title)
+                if title_filter and title_filter.lower() not in chunk.get('title', '').lower():
                     continue
                 
                 doc = self.documents[chunk['doc_idx']]
@@ -439,7 +550,7 @@ class RAG:
                     'cosine_similarity': float(cosine_similarity),
                     'l2_distance': float(dist),
                     'pdf_name': chunk['pdf_name'],
-                    'company': chunk.get('company', 'Unknown'),
+                    'title': chunk.get('title', 'Unknown'),
                     'page': chunk['page'],
                     'chunk': display_text[:500] + '...' if len(display_text) > 500 else display_text,
                     'chunk_info': f"{chunk['chunk_idx'] + 1}/{chunk['total_chunks']}",
@@ -461,15 +572,37 @@ class RAG:
         
         return results
     
-    def search_bm25(self, query: str, top_k: int = 5, use_reranker: bool = True, company_filter: Optional[str] = None) -> List[Dict]:
-        """Search using BM25 algorithm with optional company filter."""
+    def search_bm25(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        use_reranker: Optional[bool] = None,
+        title_filter: Optional[str] = None
+    ) -> List[Dict]:
+        """Search using BM25 algorithm with optional title filter.
+        
+        Args:
+            query: Search query
+            top_k: Number of results to return (uses config default if None)
+            use_reranker: Whether to use reranker (uses instance setting if None)
+            title_filter: Filter results by document title
+        
+        Returns:
+            List of search results
+        """
         if self.bm25 is None:
             raise ValueError("BM25 index not built. Call build_index() first.")
         
+        # Use config defaults
+        top_k = top_k or self.config.search.top_k
+        use_reranker = use_reranker if use_reranker is not None else self.use_reranker
+        
         # Get more candidates if using reranker or filtering
-        retrieve_k = top_k * 4 if use_reranker and self.reranker else top_k
-        if company_filter:
-            retrieve_k = min(retrieve_k * 3, len(self.chunks))  # Get more candidates for filtering
+        retrieve_multiplier = self.config.search.retrieve_multiplier
+        retrieve_k = top_k * retrieve_multiplier if use_reranker and self.reranker else top_k
+        if title_filter:
+            filter_mult = self.config.search.company_filter_multiplier
+            retrieve_k = min(retrieve_k * filter_mult, len(self.chunks))
         
         tokenized_query = query.lower().split()
         scores = self.bm25.get_scores(tokenized_query)
@@ -480,8 +613,8 @@ class RAG:
             if idx < len(self.chunks):
                 chunk = self.chunks[idx]
                 
-                # Apply company filter
-                if company_filter and chunk.get('company') != company_filter:
+                # Apply title filter (fuzzy match - check if filter is substring of title)
+                if title_filter and title_filter.lower() not in chunk.get('title', '').lower():
                     continue
                 
                 doc = self.documents[chunk['doc_idx']]
@@ -491,7 +624,7 @@ class RAG:
                     'rank': len(results) + 1,
                     'bm25_score': float(scores[idx]),
                     'pdf_name': chunk['pdf_name'],
-                    'company': chunk.get('company', 'Unknown'),
+                    'title': chunk.get('title', 'Unknown'),
                     'page': chunk['page'],
                     'chunk': display_text[:500] + '...' if len(display_text) > 500 else display_text,
                     'chunk_info': f"{chunk['chunk_idx'] + 1}/{chunk['total_chunks']}",
@@ -512,19 +645,40 @@ class RAG:
         else:
             return results[:top_k]
     
-    def search_hybrid(self, query: str, top_k: int = 5, candidates_per_method: int = 20, emb_weight: float = 0.5, bm25_weight: float = 0.5, use_reranker: bool = True, company_filter: Optional[str] = None) -> List[Dict]:
-        """Hybrid search combining BM25 and embedding with optional company filter
+    def search_hybrid(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        candidates_per_method: Optional[int] = None,
+        emb_weight: Optional[float] = None,
+        bm25_weight: Optional[float] = None,
+        use_reranker: Optional[bool] = None,
+        title_filter: Optional[str] = None
+    ) -> List[Dict]:
+        """Hybrid search combining BM25 and embedding with optional title filter
         
         Args:
             query: Search query
-            top_k: Number of final results
-            candidates_per_method: Number of candidates from each method
-            emb_weight: Weight for embedding scores (default 0.5)
-            bm25_weight: Weight for BM25 scores (default 0.5)
+            top_k: Number of final results (uses config default if None)
+            candidates_per_method: Number of candidates from each method (uses config default if None)
+            emb_weight: Weight for embedding scores (uses config default if None)
+            bm25_weight: Weight for BM25 scores (uses config default if None)
+            use_reranker: Whether to use reranker (uses instance setting if None)
+            title_filter: Filter results by document title
+        
+        Returns:
+            List of hybrid search results
         """
+        # Use config defaults
+        top_k = top_k or self.config.search.top_k
+        use_reranker = use_reranker if use_reranker is not None else self.use_reranker
+        hybrid_config = self.config.search.hybrid
+        candidates_per_method = candidates_per_method or hybrid_config.candidates_per_method
+        emb_weight = emb_weight if emb_weight is not None else hybrid_config.embedding_weight
+        bm25_weight = bm25_weight if bm25_weight is not None else hybrid_config.bm25_weight
         # Get candidates from both methods (without reranking yet)
-        emb_results = self.search(query, top_k=candidates_per_method, ef_search=100, use_reranker=False, company_filter=company_filter)
-        bm25_results = self.search_bm25(query, top_k=candidates_per_method, use_reranker=False, company_filter=company_filter)
+        emb_results = self.search(query, top_k=candidates_per_method, ef_search=100, use_reranker=False, title_filter=title_filter)
+        bm25_results = self.search_bm25(query, top_k=candidates_per_method, use_reranker=False, title_filter=title_filter)
         
         # Normalize scores using min-max normalization
         def normalize_scores(results, score_key):
@@ -593,49 +747,86 @@ class RAG:
         faiss.write_index(self.index, path)
         print(f"Index saved to {path}")
         
-    def load_index(self, path: str = 'faiss_hnsw.index'):
-        """Load a FAISS index from disk."""
+    def load_index(
+        self,
+        path: str = 'faiss_hnsw.index',
+        rebuild_chunks: bool = True,
+        rebuild_bm25: bool = True,
+        rebuild_section_embeddings: bool = False
+    ):
+        """Load a FAISS index from disk and optionally rebuild chunks/BM25
+        
+        Args:
+            path: Path to FAISS index file
+            rebuild_chunks: Whether to rebuild chunks from documents (required for BM25)
+            rebuild_bm25: Whether to rebuild BM25 index (requires chunks)
+            rebuild_section_embeddings: Whether to rebuild section embeddings (slow)
+        """
         self.index = faiss.read_index(path)
         print(f"Index loaded from {path} with {self.index.ntotal} vectors")
+        
+        # Rebuild chunks if requested and we have documents
+        if rebuild_chunks and self.documents and not self.chunks:
+            self._build_chunks()
+        
+        # Rebuild BM25 if requested and we have chunks
+        if rebuild_bm25 and self.chunks:
+            self._build_bm25_index()
+        
+        # Build section embeddings only if explicitly requested
+        if rebuild_section_embeddings and self.chunks and not self.section_embeddings:
+            self._build_section_embeddings()
     
-    def answer(self, query: str, search_method: str = 'hybrid', top_k: int = 8, 
-               company_filter: Optional[str] = None, auto_detect_company: bool = False) -> str:
+    def answer(
+        self,
+        query: str,
+        search_method: str = 'hybrid',
+        top_k: Optional[int] = None,
+        title_filter: Optional[str] = None,
+        auto_detect_title: bool = False
+    ) -> str:
         """Generate answer using retrieval and LLM with conversation context
         
         Args:
             query: User query
             search_method: 'hybrid', 'bm25', or 'semantic'
-            top_k: Number of chunks to retrieve
-            company_filter: Explicit company filter (overrides auto-detection)
-            auto_detect_company: Whether to auto-detect company from query
+            top_k: Number of chunks to retrieve (uses config default if None)
+            title_filter: Explicit document title filter (overrides auto-detection)
+            auto_detect_title: Whether to auto-detect title from query
+        
+        Returns:
+            Generated answer
         """
         if not self.use_generator or self.generator is None:
             raise ValueError("Generator not initialized. Set use_generator=True")
         
-        # Auto-detect company if enabled and no explicit filter
-        if auto_detect_company and not company_filter:
-            detected_company = self.detect_company_in_query(query)
-            if detected_company:
-                company_filter = detected_company
-                print(f"[Auto-detected company filter: {detected_company}]")
+        # Use config default for top_k
+        top_k = top_k or self.config.generation.max_context_chunks
+        
+        # Auto-detect title if enabled and no explicit filter
+        if auto_detect_title and not title_filter:
+            detected_title = self.detect_title_in_query(query)
+            if detected_title:
+                title_filter = detected_title
+                print(f"[Auto-detected title filter: {detected_title}]")
         
         if search_method == 'hybrid':
-            chunks = self.search_hybrid(query, top_k=top_k, use_reranker=True, company_filter=company_filter)
+            chunks = self.search_hybrid(query, top_k=top_k, use_reranker=True, title_filter=title_filter)
         elif search_method == 'bm25':
-            chunks = self.search_bm25(query, top_k=top_k, use_reranker=True, company_filter=company_filter)
+            chunks = self.search_bm25(query, top_k=top_k, use_reranker=True, title_filter=title_filter)
         else:
-            chunks = self.search(query, top_k=top_k, use_reranker=True, company_filter=company_filter)
+            chunks = self.search(query, top_k=top_k, use_reranker=True, title_filter=title_filter)
         
         if not chunks:
-            return f"No relevant information found{f' for {company_filter}' if company_filter else ''}."
+            return f"No relevant information found{f' for {title_filter}' if title_filter else ''}."
         
-        filter_msg = f" from {company_filter}" if company_filter else ""
+        filter_msg = f" from {title_filter}" if title_filter else ""
         print(f"\n[Retrieved {len(chunks)} chunks{filter_msg} via {search_method}]")
         result = self.generator.generate(query, chunks)
         
         print("\nSources:")
         for i, src in enumerate(result['sources'][:5], 1):
-            print(f"  {i}. {src['pdf']} - Page {src['page']} ({src.get('company', 'N/A')})")
+            print(f"  {i}. {src['pdf']} - Page {src['page']} ({src.get('title', 'N/A')})")
         
         return result['answer']
     
@@ -648,43 +839,43 @@ class RAG:
         """Get information about indexed PDFs"""
         return self.indexed_pdfs
     
-    def get_companies(self) -> List[str]:
-        """Get list of all unique companies in the indexed data"""
-        companies = set()
+    def get_titles(self) -> List[str]:
+        """Get list of all unique document titles in the indexed data"""
+        titles = set()
         for info in self.indexed_pdfs.values():
-            companies.add(info['company'])
-        return sorted(list(companies))
+            titles.add(info['title'])
+        return sorted(list(titles))
     
-    def detect_company_in_query(self, query: str) -> Optional[str]:
-        """Detect company name mentioned in query
+    def detect_title_in_query(self, query: str) -> Optional[str]:
+        """Detect document title mentioned in query
         
         Args:
             query: User query text
             
         Returns:
-            Company name if detected, None otherwise
+            Document title if detected, None otherwise
         """
-        companies = self.get_companies()
+        titles = self.get_titles()
         query_lower = query.lower()
         
         # Check for exact matches (case-insensitive)
-        for company in companies:
-            if company.lower() in query_lower:
-                return company
+        for title in titles:
+            if title.lower() in query_lower:
+                return title
         
-        # Check for partial matches (e.g., "Epson" in "Seiko Epson")
-        for company in companies:
-            company_words = company.lower().split()
-            for word in company_words:
-                if len(word) > 3 and word in query_lower:
-                    return company
+        # Check for partial matches (e.g., keywords from title)
+        for title in titles:
+            title_words = title.lower().split()
+            for word in title_words:
+                if len(word) > 3 and word in query_lower:  # Match words longer than 3 chars
+                    return title
         
         return None
     
     def search_with_auto_filter(self, query: str, top_k: int = 5, 
                                 search_method: str = 'hybrid',
                                 use_reranker: bool = True) -> List[Dict]:
-        """Search with automatic company detection from query
+        """Search with automatic document title detection from query
         
         Args:
             query: User query
@@ -693,28 +884,28 @@ class RAG:
             use_reranker: Whether to use reranker
             
         Returns:
-            List of search results with detected company info
+            List of search results with detected title info
         """
-        # Try to detect company from query
-        detected_company = self.detect_company_in_query(query)
+        # Try to detect title from query
+        detected_title = self.detect_title_in_query(query)
         
-        if detected_company:
-            print(f"[Auto-detected company filter: {detected_company}]")
+        if detected_title:
+            print(f"[Auto-detected title filter: {detected_title}]")
         
         # Perform search with detected filter
         if search_method == 'hybrid':
             results = self.search_hybrid(query, top_k=top_k, use_reranker=use_reranker, 
-                                        company_filter=detected_company)
+                                        title_filter=detected_title)
         elif search_method == 'bm25':
             results = self.search_bm25(query, top_k=top_k, use_reranker=use_reranker,
-                                      company_filter=detected_company)
+                                      title_filter=detected_title)
         else:
             results = self.search(query, top_k=top_k, use_reranker=use_reranker,
-                                 company_filter=detected_company)
+                                 title_filter=detected_title)
         
         # Add detection info to results
         for result in results:
-            result['auto_filtered'] = detected_company is not None
-            result['detected_company'] = detected_company
+            result['auto_filtered'] = detected_title is not None
+            result['detected_title'] = detected_title
         
         return results

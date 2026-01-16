@@ -1,0 +1,22 @@
+# MiniRAG Dependencies
+
+# Core ML/AI Libraries
+torch>=2.0.0
+transformers>=4.35.0
+sentence-transformers>=2.2.2
+faiss-cpu>=1.7.4  # Use faiss-gpu if you have CUDA
+accelerate>=0.24.0
+bitsandbytes>=0.41.0
+
+# Retrieval & Ranking
+rank-bm25>=0.2.2
+
+# PDF Processing
+PyMuPDF>=1.23.0
+
+# Configuration & Data
+pyyaml>=6.0
+numpy>=1.24.0
+
+# Utilities
+pathlib>=1.0.1

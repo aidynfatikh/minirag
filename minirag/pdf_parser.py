@@ -3,29 +3,39 @@ from pathlib import Path
 import json
 import re
 from collections import defaultdict
+from typing import List, Dict, Optional, Tuple
+
+from .config_loader import get_config
 
 class HierarchyTracker:
     """Tracks document hierarchy as we parse"""
-    def __init__(self):
-        self.hierarchy = {}  # level -> current header
-        self.company = None
+    
+    def __init__(self, title: Optional[str] = None):
+        self.hierarchy: Dict[int, str] = {}  # level -> current header
+        self.title: Optional[str] = title
+        self.config = get_config()
         
-    def update(self, header_text, level):
-        """Update hierarchy when we see a new header"""
+    def update(self, header_text: str, level: int) -> None:
+        """Update hierarchy when we see a new header
+        
+        Args:
+            header_text: Text of the header
+            level: Header level (1, 2, 3, etc.)
+        """
         # Clear deeper levels when we see a higher level header
         self.hierarchy = {k: v for k, v in self.hierarchy.items() if k < level}
         self.hierarchy[level] = header_text
-        
-        # Detect company name from first page headers
-        if not self.company and level == 1 and any(word in header_text.upper() for word in ['CORPORATION', 'COMPANY', 'GROUP', 'INC']):
-            self.company = header_text
     
-    def get_path(self):
-        """Get current hierarchical path"""
+    def get_path(self) -> List[str]:
+        """Get current hierarchical path
+        
+        Returns:
+            List of hierarchy path elements
+        """
         path = []
         
-        if self.company:
-            path.append(f"Company: {self.company}")
+        if self.title:
+            path.append(f"Title: {self.title}")
         
         # Add hierarchy in order of levels
         for level in sorted(self.hierarchy.keys()):
@@ -34,7 +44,7 @@ class HierarchyTracker:
                 # Check if it's a Part/Section indicator
                 if re.match(r'^(Part|Section|Chapter|Article)\s+\d+', header, re.IGNORECASE):
                     path.append(f"Part: {header}")
-                elif header != self.company:  # Don't duplicate company
+                elif header != self.title:  # Don't duplicate title
                     path.append(f"Section: {header}")
             elif level == 2:
                 path.append(f"Section: {header}")
@@ -43,18 +53,33 @@ class HierarchyTracker:
         
         return path
     
-    def format_context(self):
-        """Format hierarchy as context string"""
+    def format_context(self) -> str:
+        """Format hierarchy as context string
+        
+        Returns:
+            Formatted hierarchy string
+        """
         path = self.get_path()
         if not path:
             return ""
         return '\n'.join(path) + '\n\n'
 
-def detect_headers_and_sections(page, page_num):
+def detect_headers_and_sections(page, page_num: int, config=None) -> List[Dict]:
     """
     Detect headers and sections based on font properties and text patterns.
-    Returns a list of text blocks with metadata including section/header info.
+    
+    Args:
+        page: PyMuPDF page object
+        page_num: Page number
+        config: Configuration object (optional)
+    
+    Returns:
+        List of text blocks with metadata including section/header info
     """
+    if config is None:
+        config = get_config()
+    
+    header_config = config.document_processing.header_detection
     blocks = page.get_text("dict")["blocks"]
     
     # Collect font information
@@ -103,17 +128,21 @@ def detect_headers_and_sections(page, page_num):
         header_level = None
         
         # Check font size (headers are usually larger)
-        if font_size > avg_font_size * 1.2:
+        font_threshold = avg_font_size * header_config.font_size_multiplier
+        if font_size > font_threshold:
             is_header = True
-            if font_size >= max_font_size * 0.95:
+            large_threshold = max_font_size * header_config.large_header_multiplier
+            medium_threshold = avg_font_size * header_config.medium_header_multiplier
+            
+            if font_size >= large_threshold:
                 header_level = 1
-            elif font_size >= avg_font_size * 1.5:
+            elif font_size >= medium_threshold:
                 header_level = 2
             else:
                 header_level = 3
         
         # Check for bold text at start of line
-        elif is_bold and len(text.split()) <= 10:
+        elif is_bold and len(text.split()) <= header_config.max_header_words:
             is_header = True
             header_level = 3
         
@@ -142,10 +171,57 @@ def detect_headers_and_sections(page, page_num):
     
     return classified_blocks
 
-def parse_pdf(pdf_path):
+def _generate_fallback_title_simple(pages_data: List[Dict]) -> str:
+    """Generate a fallback title from document content without LLM
+    
+    Args:
+        pages_data: List of page dictionaries
+        
+    Returns:
+        Fallback title based on document structure
+    """
+    # Try to get title from first page headers
+    if pages_data and pages_data[0].get('metadata', {}).get('headers'):
+        headers = pages_data[0]['metadata']['headers']
+        if headers:
+            first_header = headers[0]
+            header_text = first_header.get('text', '').strip()
+            if header_text and len(header_text) > 3:
+                return header_text[:150]
+    
+    # Try to extract from first line of first page
+    if pages_data and pages_data[0].get('text'):
+        first_text = pages_data[0]['text'].strip()
+        first_line = first_text.split('\n')[0].strip()
+        if first_line and len(first_line) > 3 and len(first_line) < 150:
+            return first_line
+    
+    # Check headers from first few pages
+    for page_data in pages_data[:5]:
+        headers = page_data.get('metadata', {}).get('headers', [])
+        for header in headers:
+            header_text = header.get('text', '').strip()
+            if header_text and len(header_text) > 3 and len(header_text) < 150:
+                return header_text
+    
+    # Last resort: use generic title
+    return "Document"
+
+def parse_pdf(pdf_path: Path, extract_title_with_llm: bool = False) -> Tuple[List[Dict], Optional[str]]:
+    """Parse PDF and extract text with hierarchy
+    
+    Args:
+        pdf_path: Path to PDF file
+        extract_title_with_llm: Whether to use LLM for title extraction (requires Generator)
+    
+    Returns:
+        Tuple of (pages_data list, title)
+    """
     doc = fitz.open(pdf_path)
     pages_data = []
-    hierarchy = HierarchyTracker()
+    
+    # First pass: extract all pages without title
+    temp_hierarchy = HierarchyTracker(title=None)
     
     for page_num, page in enumerate(doc, 1):
         # Use "text" layout option for better text extraction with proper spacing
@@ -169,11 +245,11 @@ def parse_pdf(pdf_path):
                 })
                 # Update hierarchy tracker with most significant headers
                 if block['header_level'] in [1, 2, 3]:
-                    hierarchy.update(block['text'], block['header_level'])
+                    temp_hierarchy.update(block['text'], block['header_level'])
         
-        # Get current hierarchical context
-        hierarchy_path = hierarchy.get_path()
-        hierarchy_context = hierarchy.format_context()
+        # Get current hierarchical context (without title yet)
+        hierarchy_path = temp_hierarchy.get_path()
+        hierarchy_context = temp_hierarchy.format_context()
         
         # Always add page, even if text is empty (might be image-only page)
         pages_data.append({
@@ -192,24 +268,79 @@ def parse_pdf(pdf_path):
         })
     
     doc.close()
-    return pages_data
+    
+    # Extract title with LLM if requested
+    title = None
+    if extract_title_with_llm:
+        try:
+            from .generator import Generator
+            print("Extracting title using LLM...")
+            with Generator() as generator:
+                title = generator.extract_title(pages_data)
+            print(f"Extracted title: {title}")
+        except Exception as e:
+            print(f"Failed to extract title with LLM: {e}")
+            import traceback
+            traceback.print_exc()
+            # Use fallback title instead of Unknown
+            title = _generate_fallback_title_simple(pages_data)
+            print(f"Using fallback title: {title}")
+    else:
+        # When LLM is not used, generate title from headers/content
+        title = _generate_fallback_title_simple(pages_data)
+    
+    # Second pass: update hierarchy paths with title
+    if title and title != "Unknown":
+        hierarchy = HierarchyTracker(title=title)
+        
+        for page_data in pages_data:
+            # Re-process headers to update hierarchy with title
+            for header in page_data['metadata']['headers']:
+                if header['level'] in [1, 2, 3]:
+                    hierarchy.update(header['text'], header['level'])
+            
+            # Update paths with title included
+            page_data['hierarchy_path'] = hierarchy.get_path()
+            page_data['hierarchy_context'] = hierarchy.format_context()
+            page_data['metadata']['section'] = hierarchy.get_path()[-1] if hierarchy.get_path() else None
+    
+    return pages_data, title
 
-def save_parsed_data(pages_data, pdf_name, output_path):
+def save_parsed_data(pages_data: List[Dict], pdf_name: str, output_path: Path, title: Optional[str] = None) -> None:
+    """Save parsed data to JSON file
+    
+    Args:
+        pages_data: List of parsed page dictionaries
+        pdf_name: Name of the PDF file
+        output_path: Path to save JSON output
+        title: Document title (optional)
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         'pdf_name': pdf_name,
+        'title': title or 'Unknown',
         'total_pages': len(pages_data),
         'pages': pages_data
     }
     output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-def process_pdf(pdf_path, output_dir):
+def process_pdf(pdf_path: Path, output_dir: Path, use_llm_for_title: bool = False) -> Path:
+    """Process a single PDF file
+    
+    Args:
+        pdf_path: Path to PDF file
+        output_dir: Directory to save output
+        use_llm_for_title: Whether to use LLM for title extraction
+    
+    Returns:
+        Path to output JSON file
+    """
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
     
-    pages_data = parse_pdf(pdf_path)
+    pages_data, title = parse_pdf(pdf_path, extract_title_with_llm=use_llm_for_title)
     output_path = output_dir / f"{pdf_path.stem}.json"
-    save_parsed_data(pages_data, pdf_path.name, output_path)
+    save_parsed_data(pages_data, pdf_path.name, output_path, title)
     
     return output_path
 
