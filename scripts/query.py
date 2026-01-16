@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirag import RAG, get_config
+from minirag.query_orchestrator import QueryOrchestrator
 
 def signal_handler(sig, frame):
     """Handle Ctrl-C gracefully"""
@@ -20,111 +21,139 @@ def main():
     
     config = get_config()
     output_dir = project_root / config.paths.parsed_data_dir
-    json_files = list(output_dir.glob("*.json"))
+    index_path = project_root / config.paths.index_file
     
+    # Check if index exists first
+    if not index_path.exists():
+        print(f"\n❌ Index not found at {index_path}")
+        print("Please build the index first by running:")
+        print("  python3 index.py")
+        return
+    
+    json_files = list(output_dir.glob("*.json"))
     if not json_files:
-        print(f"No parsed JSON files found in {output_dir}/")
+        print(f"❌ No parsed JSON files found in {output_dir}/")
         return
     
     print("="*80)
-    print("Initializing RAG with Conversational Generation")
+    print("MiniRAG - Interactive Query System")
     print("="*80)
     
+    # Initialize RAG with generator for conversational responses
+    print("Loading RAG system...")
     rag = RAG(config=config, use_generator=True)
     
     # Load all PDFs
+    print(f"Loading {len(json_files)} documents...")
     rag.load_data([str(f) for f in json_files])
     
-    # Check if index exists, load it instead of rebuilding
-    index_path = project_root / config.paths.index_file
-    if index_path.exists():
-        print(f"Loading existing index from {index_path}...")
-        rag.load_index(str(index_path), rebuild_chunks=True, rebuild_bm25=True, rebuild_section_embeddings=False)
-    else:
-        print("Building new index...")
-        rag.build_index()
-        rag.save_index(str(index_path))
-        print(f"Index saved to {index_path}")
+    # Load existing index (no rebuilding, no parsing)
+    print(f"Loading index...")
+    rag.load_index(str(index_path), rebuild_chunks=False, rebuild_bm25=False, rebuild_section_embeddings=False)
     
-    # Show indexed PDFs
-    print("\n" + "="*80)
-    print("Indexed PDFs:")
-    for pdf_name, info in rag.get_indexed_pdfs().items():
-        print(f"  • {pdf_name} - {info['title']} ({info['pages']} pages)")
+    # Rebuild only if needed
+    if not rag.chunks:
+        print("Rebuilding chunks and BM25 index...")
+        rag._build_chunks()
+        rag._build_bm25_index()
+    elif not rag.bm25:
+        print("Rebuilding BM25 index...")
+        rag._build_bm25_index()
+    
+    # Initialize query orchestrator for smart query processing
+    print("Initializing Query Orchestrator...")
+    orchestrator = QueryOrchestrator(rag, rag.generator)
+    
+    print(f"\n✓ Ready! Loaded {len(rag.indexed_pdfs)} documents")
     
     print("\n" + "="*80)
-    print("Ready! Conversational RAG (remembers context)")
     print("Commands:")
-    print("  'exit' - quit")
-    print("  'clear' - reset conversation")
-    print("  'pdfs' - show indexed PDFs")
-    print("  'titles' - show all document titles")
-    print("  'title:<name>' - filter by document title (e.g., 'title:2022 Annual Report')")
-    print("  'auto' - toggle auto-detect title from query")
+    print("  Just type your question - the system will automatically:")
+    print("    • Extract company names from your query")
+    print("    • Rephrase for better retrieval")
+    print("    • Generate conversational answers")
+    print()
+    print("  'exit' or 'quit' - Exit the program")
+    print("  'clear' - Reset conversation history")
+    print("  'titles' - Show all document titles")
     print("="*80)
     
-    current_filter = None
-    auto_detect = False  # Auto-detect title from query
+    # Maintain conversation history for context-aware rephrasing
+    conversation_history = []
     
     while True:
-        prompt_prefix = f"[{current_filter}] " if current_filter else ""
-        auto_prefix = "[AUTO] " if auto_detect else ""
-        query = input(f"\n{auto_prefix}{prompt_prefix}You: ").strip()
+        query = input("\n❓ You: ").strip()
         
         if query.lower() in ['exit', 'quit', 'q']:
+            print("\nGoodbye!")
             break
+            
         if query.lower() == 'clear':
             rag.clear_conversation()
-            current_filter = None
-            print("Conversation cleared!")
+            conversation_history = []
+            print("✓ Conversation cleared!")
             continue
-        if query.lower() == 'pdfs':
-            print("\nIndexed PDFs:")
-            for pdf_name, info in rag.get_indexed_pdfs().items():
-                print(f"  • {pdf_name} - {info['title']} ({info['pages']} pages)")
-            continue
+            
         if query.lower() == 'titles':
-            titles = rag.get_titles()
-            print(f"\nIndexed Document Titles ({len(titles)}):")
-            for title in titles:
-                pdfs = [name for name, info in rag.get_indexed_pdfs().items() if info['title'] == title]
-                print(f"  • {title}: {len(pdfs)} documents")
-            continue
-        if query.lower() == 'auto':
-            auto_detect = not auto_detect
-            status = "enabled" if auto_detect else "disabled"
-            print(f"Auto-detect title: {status}")
-            continue
-        if query.lower().startswith('title:'):
-            title = query.split(':', 1)[1].strip()
-            # Validate title exists
             titles = set(info['title'] for info in rag.get_indexed_pdfs().values())
-            if title not in titles:
-                print(f"Title '{title}' not found. Available: {', '.join(sorted(titles))}")
-            else:
-                current_filter = title
-                print(f"Filtering by title: {title}")
+            print(f"\n📄 Document Titles ({len(titles)}):")
+            for title in sorted(titles):
+                print(f"  • {title}")
             continue
+            
         if not query:
             continue
         
-        print(f"\n{'='*80}")
+        print(f"\n{'─'*80}")
         try:
-            # Use explicit filter if set, otherwise use auto-detect
-            filter_to_use = current_filter if current_filter else None
-            answer = rag.answer(
-                query, 
-                search_method='hybrid', 
-                top_k=8, 
-                title_filter=filter_to_use,
-                auto_detect_title=auto_detect and not current_filter
+            # Use conversational orchestrator with history
+            result = orchestrator.execute_conversational_query(
+                query,
+                conversation_history=conversation_history,
+                top_k=8,
+                use_reranker=True,
+                method='hybrid'
             )
-            print(f"\nAssistant: {answer}")
+            
+            # Show what the orchestrator did
+            if result['extracted_company']:
+                print(f"🏢 Company: {result['extracted_company']}")
+            if result['title_filter']:
+                print(f"📑 Document: {result['title_filter']}")
+            if result['search_query'] != query:
+                print(f"🔍 Rephrased: {result['search_query']}")
+            
+            # Generate answer using retrieved chunks
+            if result['results']:
+                # Format chunks for generator
+                chunks = result['results']
+                
+                # Show sources at top
+                print(f"\n📚 Sources ({len(chunks)} retrieved):")
+                for i, chunk in enumerate(chunks[:5], 1):
+                    print(f"  {i}. {chunk['title']} (Page {chunk['page']})")
+                if len(chunks) > 5:
+                    print(f"  ... and {len(chunks)-5} more")
+                
+                # Generate and show answer at bottom
+                answer_dict = rag.generator.generate(query, chunks)
+                answer = answer_dict['answer']
+                
+                # Add to conversation history
+                conversation_history.append((query, answer))
+                
+                print(f"\n{'─'*80}")
+                print(f"💬 Answer:\n")
+                print(answer)
+            else:
+                print("\n⚠️  No relevant documents found for your query.")
+                
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"\n❌ Error: {e}")
             import traceback
             traceback.print_exc()
-        print('='*80)
+        
+        print('─'*80)
 
 if __name__ == "__main__":
     main()

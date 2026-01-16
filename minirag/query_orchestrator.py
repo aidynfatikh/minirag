@@ -136,11 +136,11 @@ class QueryOrchestrator:
         prompt_messages = [
             {
                 "role": "system",
-                "content": "You rephrase queries for document retrieval. Focus on key concepts and remove question words."
+                "content": "You rephrase queries for document search. Output ONLY the rephrased query, nothing else."
             },
             {
                 "role": "user",
-                "content": f"{context}\n\nOriginal: \"{query}\"\n\nRephrase for search by:\n1. Removing question words\n2. Keeping key terms\n3. Expanding acronyms\n\nRephrased:"
+                "content": f"Rephrase for search (remove question words, keep key terms): \"{query}\"\n\nRephrased query:"
             }
         ]
         
@@ -169,7 +169,24 @@ class QueryOrchestrator:
             
             generated_ids = outputs[0][inputs['input_ids'].shape[1]:]
             rephrased = self.generator.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+            
+            # Clean up the output: take only the first line, remove quotes
+            rephrased = rephrased.split('\n')[0].strip()
             rephrased = rephrased.replace('"', '').replace("'", "")
+            
+            # Remove common prefixes from LLM verbosity
+            prefixes_to_remove = [
+                "Here are the rephrased queries:",
+                "Rephrased query:",
+                "Here is the rephrased query:",
+                "The rephrased query is:",
+                "Query:",
+                "1.",
+                "2.",
+            ]
+            for prefix in prefixes_to_remove:
+                if rephrased.lower().startswith(prefix.lower()):
+                    rephrased = rephrased[len(prefix):].strip()
             
             # If rephrasing failed or is too short, use original
             if len(rephrased) < 5:
@@ -181,6 +198,151 @@ class QueryOrchestrator:
             print(f"Warning: Failed to rephrase query: {e}")
             return query
     
+    def _rephrase_with_context(self, query: str, conversation_history: list) -> str:
+        """Rephrase query using conversation context to resolve references
+        
+        Args:
+            query: Current user query
+            conversation_history: List of (user_query, assistant_answer) tuples
+            
+        Returns:
+            Rephrased standalone query
+        """
+        # Build context from recent conversation
+        context_str = ""
+        if conversation_history:
+            recent = conversation_history[-3:]  # Last 3 exchanges
+            for i, (user_q, _) in enumerate(recent, 1):
+                context_str += f"{i}. User asked: {user_q}\n"
+        
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": "You are a query reformulation assistant. Given conversation history and a user's follow-up query, rewrite it as a standalone search query that resolves all pronouns and references. Output ONLY the rewritten query, nothing else."
+            },
+            {
+                "role": "user",
+                "content": f"Previous conversation:\n{context_str}\n\nCurrent query: \"{query}\"\n\nRewrite as standalone query:"
+            }
+        ]
+        
+        try:
+            prompt = self.generator.tokenizer.apply_chat_template(
+                prompt_messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            
+            inputs = self.generator.tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=1024
+            ).to(self.generator.device)
+            
+            with torch.no_grad():
+                outputs = self.generator.model.generate(
+                    **inputs,
+                    max_new_tokens=100,
+                    temperature=0.3,
+                    do_sample=True,
+                    pad_token_id=self.generator.tokenizer.pad_token_id,
+                )
+            
+            generated_ids = outputs[0][inputs['input_ids'].shape[1]:]
+            rephrased = self.generator.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+            
+            # Clean up output
+            rephrased = rephrased.split('\n')[0].strip()
+            rephrased = rephrased.replace('"', '').replace("'", "")
+            
+            # Remove common prefixes
+            prefixes_to_remove = [
+                "Standalone query:",
+                "Rewritten query:",
+                "Query:",
+            ]
+            for prefix in prefixes_to_remove:
+                if rephrased.lower().startswith(prefix.lower()):
+                    rephrased = rephrased[len(prefix):].strip()
+            
+            # If rephrasing failed or is too short, use original
+            if len(rephrased) < 5:
+                return query
+            
+            return rephrased
+            
+        except Exception as e:
+            print(f"Warning: Failed to rephrase with context: {e}")
+            return query
+    
+    def execute_conversational_query(
+        self,
+        query: str,
+        conversation_history: list = None,
+        top_k: int = 10,
+        use_reranker: bool = True,
+        method: str = 'hybrid'
+    ) -> Dict:
+        """Execute query with conversation context awareness
+        
+        Args:
+            query: Current user query
+            conversation_history: List of (user_query, assistant_answer) tuples
+            top_k: Number of results
+            use_reranker: Whether to use reranker
+            method: Search method ('hybrid', 'embedding', or 'bm25')
+            
+        Returns:
+            Dictionary with results and metadata
+        """
+        conversation_history = conversation_history or []
+        
+        # Extract company name from current query
+        company_name = self._extract_company_from_query(query)
+        
+        # Match company to actual title
+        title_filter = None
+        if company_name:
+            title_filter = self._match_company_to_title(company_name)
+            if not title_filter:
+                print(f"Warning: Could not find document for company '{company_name}'")
+        
+        # Rephrase query with conversation context
+        search_query = self._rephrase_with_context(query, conversation_history)
+        
+        # Execute search
+        if method == 'hybrid':
+            results = self.rag.search_hybrid(
+                search_query,
+                top_k=top_k,
+                use_reranker=use_reranker,
+                title_filter=title_filter
+            )
+        elif method == 'embedding':
+            results = self.rag.search(
+                search_query,
+                top_k=top_k,
+                use_reranker=use_reranker,
+                title_filter=title_filter
+            )
+        else:  # bm25
+            results = self.rag.search_bm25(
+                search_query,
+                top_k=top_k,
+                use_reranker=use_reranker,
+                title_filter=title_filter
+            )
+        
+        return {
+            'query': query,
+            'search_query': search_query,
+            'extracted_company': company_name,
+            'title_filter': title_filter,
+            'results': results,
+            'num_results': len(results)
+        }
+    
     def execute_query(
         self,
         query: str,
@@ -189,7 +351,7 @@ class QueryOrchestrator:
         method: str = 'hybrid',
         rephrase: bool = True
     ) -> Dict:
-        """Execute query with intelligent orchestration
+        """Execute query with intelligent orchestration (for evaluation/non-conversational use)
         
         Args:
             query: User query
