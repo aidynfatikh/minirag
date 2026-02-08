@@ -17,6 +17,7 @@ PyMuPDF>=1.23.0
 # Configuration & Data
 pyyaml>=6.0
 numpy>=1.24.0
+python-dotenv>=1.0.0
 
 # Utilities
 pathlib>=1.0.1

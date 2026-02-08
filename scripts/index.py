@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Index Builder for MiniRAG
-Creates vector database from parsed PDFs with detailed logging
+Creates vector database from parsed JSON files in parsed_data/ folder
 """
 
 import logging
@@ -16,13 +16,9 @@ import signal
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirag import RAG, get_config
-from minirag.generator import Generator
 
 # Global flag for graceful shutdown
 _shutdown_requested = False
-
-# Global LLM extractor for title extraction
-_llm_extractor: Optional[Generator] = None
 
 def signal_handler(sig, frame):
     """Handle Ctrl-C gracefully"""
@@ -48,148 +44,49 @@ def setup_logging(log_dir: Optional[Path] = None, config=None) -> Path:
         config = get_config()
     
     # Get project root for proper path resolution
-    project_root = Path(__file__).resolve().parent.parent
-    
+    project_root = Path(__file__).parent.parent
     if log_dir is None:
         log_dir = project_root / config.paths.logs_dir
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
     
-    log_dir.mkdir(exist_ok=True)
-    log_config = config.logging
-    timestamp = datetime.now().strftime(log_config.file_timestamp_format)
+    # Create timestamp for this run
+    timestamp = datetime.now().strftime(config.logging.file_timestamp_format)
     log_file = log_dir / f"indexing_{timestamp}.log"
     
-    # Create formatters
-    detailed_formatter = logging.Formatter(
-        log_config.format,
-        datefmt=log_config.date_format
-    )
-    simple_formatter = logging.Formatter('%(message)s')
+    # Setup logging format
+    log_format = config.logging.format
+    date_format = config.logging.date_format
     
-    # File handler - detailed logging
+    # Remove existing handlers
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    
+    # Create handlers
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(detailed_formatter)
+    file_handler.setFormatter(logging.Formatter(log_format, date_format))
     
-    # Console handler - simpler output
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(simple_formatter)
+    console_handler.setFormatter(logging.Formatter(log_format, date_format))
     
-    # Root logger
-    logger = logging.getLogger()
-    logger.setLevel(getattr(logging, log_config.level.upper()))
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    # Setup root logger
+    logging.root.setLevel(logging.DEBUG)
+    logging.root.addHandler(file_handler)
+    logging.root.addHandler(console_handler)
     
     return log_file
 
-def extract_title_from_json(json_path: Path) -> str:
-    """Extract title from parsed JSON file metadata or generate from content
-    
-    Args:
-        json_path: Path to parsed JSON file
-    
-    Returns:
-        Extracted document title (never returns 'Unknown')
-    """
-    # Headers to skip as they are too generic
-    SKIP_HEADERS = {
-        'united states', 'washington', 'table of contents', 'contents',
-        'documents incorporated by reference', 'or', 'and', 'the', 
-        'page', 'index', 'part', 'item', 'section', 'd.c.', 'washington, d.c.'
-    }
-    
-    # Patterns that indicate a good title (in priority order)
-    GOOD_TITLE_PATTERNS = [
-        'annual report', 'form 10-k', 'form 10-q', 'form 20-f', 'form 8-k',
-        'quarterly report', 'financial statements', 'proxy statement',
-        'prospectus', 'registration statement', 'report'
-    ]
-    
-    def is_good_header(text: str) -> bool:
-        """Check if header is meaningful enough for a title"""
-        text_lower = text.lower().strip()
-        # Skip if too short or in skip list
-        if len(text_lower) < 4 or text_lower in SKIP_HEADERS:
-            return False
-        # Skip if starts with numbers, underscores, or just numbers
-        if text_lower[0].isdigit() or text_lower.startswith('_'):
-            return False
-        # Skip if it's mostly numbers/special chars
-        alpha_count = sum(1 for c in text_lower if c.isalpha())
-        if alpha_count < len(text_lower) * 0.5:
-            return False
-        return True
-    
-    def find_best_title(headers_list: list) -> str:
-        """Find the best title from a list of headers"""
-        # First, look for headers with good title patterns (prioritize by pattern order)
-        for pattern in GOOD_TITLE_PATTERNS:
-            for h in headers_list:
-                if pattern in h.lower():
-                    return h
-        
-        # Otherwise, return first meaningful header that's not too generic
-        for h in headers_list:
-            if is_good_header(h):
-                return h
-        return None
-    
-    try:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        # Get title from metadata (if it exists)
-        title = data.get('title', None)
-        if title and title not in ['Unknown', 'unknown', '', None]:
-            return title
-        
-        pages = data.get('pages', [])
-        
-        # Collect headers from first 5 pages
-        all_headers = []
-        for page_data in pages[:5]:
-            headers = page_data.get('metadata', {}).get('headers', [])
-            for header in headers:
-                header_text = header.get('text', '').strip()
-                if header_text and len(header_text) > 3 and len(header_text) < 150:
-                    all_headers.append(header_text)
-        
-        # Find best title from headers
-        if all_headers:
-            best_title = find_best_title(all_headers)
-            if best_title:
-                return best_title
-        
-        # Try first meaningful line of first page text
-        if pages and pages[0].get('text'):
-            first_text = pages[0]['text'].strip()
-            for line in first_text.split('\n')[:10]:  # Check first 10 lines
-                line = line.strip()
-                if line and len(line) > 5 and len(line) < 150 and is_good_header(line):
-                    return line
-        
-        # Use PDF filename as last resort
-        pdf_name = data.get('pdf_name', 'document.pdf')
-        return pdf_name.replace('.pdf', '').replace('_', ' ').replace('-', ' ')
-        
-    except Exception as e:
-        logging.warning(f"  Error extracting title: {e}")
-        # Return filename-based title
-        return json_path.stem.replace('_', ' ').replace('-', ' ')
-
-def analyze_parsed_data(parsed_dir: Path, use_llm: bool = True) -> List[Dict]:
+def analyze_parsed_data(parsed_dir: Path) -> List[Dict]:
     """Analyze all parsed JSON files and extract metadata
     
     Args:
         parsed_dir: Directory containing parsed JSON files
-        use_llm: Whether to use LLM for title extraction
     
     Returns:
         List of file info dictionaries
     """
-    global _llm_extractor
-    
     logging.info("="*80)
     logging.info("Analyzing parsed data...")
     logging.info("="*80)
@@ -200,17 +97,6 @@ def analyze_parsed_data(parsed_dir: Path, use_llm: bool = True) -> List[Dict]:
         return []
     
     logging.info(f"Found {len(json_files)} parsed PDF files")
-    
-    # Initialize LLM extractor if enabled
-    if use_llm and _llm_extractor is None:
-        logging.info("Initializing LLM for title extraction...")
-        try:
-            _llm_extractor = Generator()
-            logging.info("✓ LLM initialized")
-        except Exception as e:
-            logging.warning(f"⚠ Failed to initialize LLM: {e}")
-            logging.warning("  Falling back to rule-based title extraction")
-            use_llm = False
     
     file_info = []
     titles = {}
@@ -230,17 +116,11 @@ def analyze_parsed_data(parsed_dir: Path, use_llm: bool = True) -> List[Dict]:
             
             logging.info(f"[{idx}/{len(json_files)}] Processing {pdf_name}...")
             
-            # Check if title already exists in metadata
-            existing_title = data.get('title', None)
-            if existing_title and existing_title not in ['Unknown', 'unknown', '', None]:
-                title = existing_title
-            elif use_llm and _llm_extractor:
-                # Use LLM to extract title from page data
-                pages = data.get('pages', [])
-                title = _llm_extractor.extract_title(pages)
-            else:
-                # Fall back to rule-based extraction
-                title = extract_title_from_json(json_file)
+            # Get title from metadata (should be present from parse.py)
+            title = data.get('title', 'Unknown')
+            if not title or title in ['Unknown', 'unknown', '']:
+                logging.warning(f"  ⚠ No title in metadata, using filename")
+                title = pdf_name.replace('.pdf', '').replace('_', ' ').replace('-', ' ')
             
             info = {
                 'json_path': str(json_file),
@@ -250,13 +130,6 @@ def analyze_parsed_data(parsed_dir: Path, use_llm: bool = True) -> List[Dict]:
             }
             file_info.append(info)
             total_pages += num_pages
-            
-            # Save title back to JSON metadata
-            if title != existing_title:
-                data['title'] = title
-                with open(json_file, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                logging.info(f"  ✓ Updated metadata with title: {title}")
             
             # Track titles
             if title not in titles:
@@ -280,7 +153,7 @@ def analyze_parsed_data(parsed_dir: Path, use_llm: bool = True) -> List[Dict]:
     unknown_count = titles.get('Unknown', {}).get('count', 0)
     if unknown_count > len(json_files) * 0.3:
         logging.warning(f"\n⚠ Warning: {unknown_count} documents with unknown title ({unknown_count*100//len(json_files)}%)")
-        logging.warning("  Consider re-parsing these documents with LLM-based title extraction.")
+        logging.warning("  Consider re-parsing these documents with: python scripts/parse.py")
     
     return file_info
 
@@ -292,15 +165,11 @@ def build_vector_database(
     overlap: Optional[int] = None,
     m: Optional[int] = None,
     ef_construction: Optional[int] = None,
-    force_rebuild: bool = False,
-    use_llm: bool = True
+    force_rebuild: bool = False
 ):
     """Build vector database from parsed PDFs with detailed logging
     
     All parameters are optional and will use config defaults if not provided.
-    
-    Args:
-        use_llm: Whether to use LLM for title extraction (default: True)
     """
     config = get_config()
     
@@ -337,9 +206,10 @@ def build_vector_database(
             return
     
     # Analyze data and extract titles from metadata
-    file_info = analyze_parsed_data(parsed_dir, use_llm=use_llm)
+    file_info = analyze_parsed_data(parsed_dir)
     if not file_info:
         logging.error("No data to index!")
+        logging.error("Please parse PDFs first using: python scripts/parse.py")
         return
     
     # Initialize RAG
@@ -449,13 +319,6 @@ def build_vector_database(
     logging.info(f"Index ready for use!")
     logging.info("="*80)
     
-    # Cleanup LLM extractor if it was used
-    global _llm_extractor
-    if _llm_extractor is not None:
-        logging.info("Cleaning up LLM...")
-        _llm_extractor.cleanup()
-        _llm_extractor = None
-    
     return rag
 
 def main():
@@ -482,8 +345,6 @@ def main():
                        help='HNSW ef_construction parameter')
     parser.add_argument('--force', action='store_true',
                        help='Force rebuild even if index exists')
-    parser.add_argument('--no-llm', action='store_true',
-                       help='Disable LLM-based title extraction (use rule-based fallback)')
     parser.add_argument('--log-dir', type=str, default=None,
                        help='Directory for log files (default: logs)')
     
@@ -523,8 +384,7 @@ def main():
             overlap=args.overlap,
             m=args.m,
             ef_construction=args.ef_construction,
-            force_rebuild=args.force,
-            use_llm=not args.no_llm
+            force_rebuild=args.force
         )
         
         logging.info("\n✓ Indexing completed successfully!")

@@ -9,7 +9,7 @@ A production-ready Retrieval-Augmented Generation (RAG) system with hybrid searc
 - **Section-Aware Retrieval**: Semantic boost based on document structure
 - **Conversational Generation**: LLaMA 3.2 with history tracking
 - **PDF Processing**: Automatic hierarchy extraction and header detection
-- **Company Filtering**: Auto-detect and filter by company
+- **Document Filtering**: Auto-detect and filter by document title
 - **Evaluation Framework**: Comprehensive metrics (Recall@k, F1, precision)
 - **Configuration-Driven**: All parameters in YAML config with model alternatives
 - **Modular Structure**: Clean folder organization for maintainability
@@ -127,10 +127,7 @@ python scripts/query.py
 Interactive commands:
 - `exit` - Quit
 - `clear` - Reset conversation
-- `pdfs` - Show indexed documents
-- `companies` - List all companies
-- `company:<name>` - Filter by company
-- `auto` - Toggle auto-detect company
+- `titles` - Show all document titles
 
 ### 4. Evaluate
 
@@ -217,7 +214,7 @@ Test cases in `test_cases.json`:
 [
   {
     "id": 1,
-    "query": "What is the company's revenue?",
+    "query": "What is the revenue for this document?",
     "expected_pages": [10, 11],
     "category": "financial",
     "difficulty": "easy"
@@ -244,7 +241,7 @@ Test cases in `test_cases.json`:
 Logs are saved to `logs/indexing_YYYYMMDD_HHMMSS.log` with:
 - Build progress
 - Chunk statistics
-- Company detection
+- Document detection
 - Error traces
 
 Configure log level in `config.yaml`:

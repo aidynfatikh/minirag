@@ -4,8 +4,57 @@ import json
 import re
 from collections import defaultdict
 from typing import List, Dict, Optional, Tuple
+import signal
 
 from .config_loader import get_config
+
+# Optional: only import Generator when needed for type hint / LLM path
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .generator import Generator
+
+# Timeout handler for problematic pages
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("Page processing timeout")
+
+
+def _sanitize_extracted_text(text: str) -> str:
+    """Strip control chars and normalize whitespace that can appear with bad font encoding."""
+    if not text:
+        return text
+    # Remove control characters except newline, tab, carriage return
+    sanitized = "".join(
+        c for c in text
+        if c in "\n\r\t" or (ord(c) >= 32 and ord(c) != 0x7F)
+    )
+    return sanitized
+
+
+def _text_looks_corrupted(text: str, sample_len: int = 500) -> bool:
+    """True if extracted text looks like garbage (wrong encoding/font), not readable prose."""
+    sample = (text or "")[:sample_len]
+    if len(sample) < 20:
+        return False
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n\r\t.,'-&();:!/")
+    allowed_count = sum(1 for c in sample if c in allowed)
+    return allowed_count < 0.5 * len(sample)
+
+
+def _title_looks_like_garbage(title: str) -> bool:
+    """True if string looks like encoding garbage (e.g. 99H=B;K=@@...), not a real title."""
+    if not title or len(title) < 3:
+        return True
+    garbage = set("=@<>;:\\")
+    if sum(1 for c in title if c in garbage) > 2:
+        return True
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,'-&()")
+    if sum(1 for c in title if c in allowed) < 0.7 * len(title):
+        return True
+    return False
+
 
 class HierarchyTracker:
     """Tracks document hierarchy as we parse"""
@@ -80,16 +129,27 @@ def detect_headers_and_sections(page, page_num: int, config=None) -> List[Dict]:
         config = get_config()
     
     header_config = config.document_processing.header_detection
-    blocks = page.get_text("dict")["blocks"]
+    
+    try:
+        blocks = page.get_text("dict")["blocks"]
+    except Exception as e:
+        # If we can't get blocks, return empty list
+        return []
+    
+    # Limit processing to prevent freeze on malformed PDFs
+    MAX_BLOCKS = 10000  # Safety limit
+    if len(blocks) > MAX_BLOCKS:
+        # PDF has too many blocks, skip header detection
+        return []
     
     # Collect font information
     font_sizes = []
     text_blocks = []
     
-    for block in blocks:
+    for block in blocks[:MAX_BLOCKS]:  # Process limited blocks
         if block.get("type") == 0:  # Text block
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
+            for line in block.get("lines", [])[:100]:  # Limit lines per block too
+                for span in line.get("spans", [])[:50]:  # Limit spans per line
                     text = span.get("text", "").strip()
                     if text:
                         font_size = span.get("size", 0)
@@ -186,107 +246,199 @@ def _generate_fallback_title_simple(pages_data: List[Dict]) -> str:
         if headers:
             first_header = headers[0]
             header_text = first_header.get('text', '').strip()
-            if header_text and len(header_text) > 3:
+            if header_text and len(header_text) > 3 and not _title_looks_like_garbage(header_text):
                 return header_text[:150]
-    
+
     # Try to extract from first line of first page
     if pages_data and pages_data[0].get('text'):
         first_text = pages_data[0]['text'].strip()
         first_line = first_text.split('\n')[0].strip()
-        if first_line and len(first_line) > 3 and len(first_line) < 150:
+        if (
+            first_line
+            and len(first_line) > 3
+            and len(first_line) < 150
+            and not _title_looks_like_garbage(first_line)
+        ):
             return first_line
-    
+
     # Check headers from first few pages
     for page_data in pages_data[:5]:
         headers = page_data.get('metadata', {}).get('headers', [])
         for header in headers:
             header_text = header.get('text', '').strip()
-            if header_text and len(header_text) > 3 and len(header_text) < 150:
-                return header_text
-    
-    # Last resort: use generic title
+            if (
+                header_text
+                and len(header_text) > 3
+                and len(header_text) < 150
+                and not _title_looks_like_garbage(header_text)
+            ):
+                return header_text[:150]
+
     return "Document"
 
-def parse_pdf(pdf_path: Path, extract_title_with_llm: bool = False) -> Tuple[List[Dict], Optional[str]]:
-    """Parse PDF and extract text with hierarchy
-    
+def parse_pdf(
+    pdf_path: Path,
+    extract_title_with_llm: bool = False,
+    verbose: bool = False,
+    simple_mode: bool = False,
+    generator: Optional["Generator"] = None,
+) -> Tuple[List[Dict], Optional[str]]:
+    """Parse PDF and extract text with hierarchy.
+
     Args:
         pdf_path: Path to PDF file
-        extract_title_with_llm: Whether to use LLM for title extraction (requires Generator)
-    
+        extract_title_with_llm: Whether to use LLM for title extraction
+        verbose: Print progress for each page
+        simple_mode: Skip complex header detection (faster, less metadata)
+        generator: Optional shared Generator instance for title extraction.
+            If provided and extract_title_with_llm is True, this instance is used
+            instead of creating a new one (avoids loading the LLM per PDF).
+
     Returns:
-        Tuple of (pages_data list, title)
+        Tuple of (pages_data list, title, corrupted_pages_count).
+        corrupted_pages_count is the number of pages marked unreadable (font encoding).
     """
     doc = fitz.open(pdf_path)
     pages_data = []
-    
+    total_pages = len(doc)
+    # PDF document metadata title (can be used when page extraction is corrupted)
+    pdf_metadata_title = (doc.metadata.get("title") or "").strip() or None
+
     # First pass: extract all pages without title
     temp_hierarchy = HierarchyTracker(title=None)
-    
+    corrupted_pages_count = 0
+
     for page_num, page in enumerate(doc, 1):
-        # Use "text" layout option for better text extraction with proper spacing
-        text = page.get_text("text").strip()
+        # Set timeout for this page (5 seconds)
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(5)
         
-        # Fallback to dict method if text is empty
-        if not text:
-            text = page.get_text().strip()
-        
-        # Detect headers and sections
-        blocks_with_metadata = detect_headers_and_sections(page, page_num)
-        
-        # Extract headers for this page and update hierarchy
-        headers = []
-        for block in blocks_with_metadata:
-            if block.get('is_header'):
-                headers.append({
-                    'text': block['text'],
-                    'level': block['header_level'],
-                    'font_size': block['font_size']
-                })
-                # Update hierarchy tracker with most significant headers
-                if block['header_level'] in [1, 2, 3]:
-                    temp_hierarchy.update(block['text'], block['header_level'])
-        
-        # Get current hierarchical context (without title yet)
-        hierarchy_path = temp_hierarchy.get_path()
-        hierarchy_context = temp_hierarchy.format_context()
-        
-        # Always add page, even if text is empty (might be image-only page)
-        pages_data.append({
-            'page': page_num,
-            'text': text if text else f"[Page {page_num} - No extractable text]",
-            'hierarchy_path': hierarchy_path,
-            'hierarchy_context': hierarchy_context,
-            'metadata': {
+        try:
+            # Use "text" layout option for better text extraction with proper spacing
+            text = page.get_text("text").strip()
+            if not text:
+                text = page.get_text().strip()
+            # Strip control chars that can appear with bad font encoding
+            text = _sanitize_extracted_text(text)
+
+            # If page text looks corrupted (wrong font encoding), don't use it or its headers
+            if len(text) > 100 and _text_looks_corrupted(text):
+                text = f"[Page {page_num} - text unreadable (font encoding)]"
+                blocks_with_metadata = []
+                corrupted_pages_count += 1
+                if verbose:
+                    print(f"  page {page_num}/{total_pages} [encoding issue, marked unreadable]")
+            elif not simple_mode:
+                try:
+                    blocks_with_metadata = detect_headers_and_sections(page, page_num)
+                except (Exception, TimeoutException) as e:
+                    if verbose and isinstance(e, TimeoutException):
+                        print(f"  [page {page_num} timeout, skipping header detection]")
+                    elif verbose:
+                        print(f"  [page {page_num} header detection failed: {str(e)[:50]}]")
+                    blocks_with_metadata = []
+            else:
+                blocks_with_metadata = []
+
+            # Extract headers for this page and update hierarchy
+            headers = []
+            for block in blocks_with_metadata:
+                if block.get('is_header'):
+                    headers.append({
+                        'text': block['text'],
+                        'level': block['header_level'],
+                        'font_size': block['font_size']
+                    })
+                    # Update hierarchy tracker with most significant headers
+                    if block['header_level'] in [1, 2, 3]:
+                        temp_hierarchy.update(block['text'], block['header_level'])
+            
+            # Get current hierarchical context (without title yet)
+            hierarchy_path = temp_hierarchy.get_path()
+            hierarchy_context = temp_hierarchy.format_context()
+            
+            page_metadata = {
                 'headers': headers,
                 'section': hierarchy_path[-1] if hierarchy_path else None,
                 'num_headers': len(headers),
                 'has_bold': any(b.get('is_bold', False) for b in blocks_with_metadata),
                 'has_italic': any(b.get('is_italic', False) for b in blocks_with_metadata),
-                'has_text': bool(text)
+                'has_text': bool(text),
             }
-        })
+            if page_num == 1 and pdf_metadata_title:
+                page_metadata['pdf_metadata_title'] = pdf_metadata_title
+            pages_data.append({
+                'page': page_num,
+                'text': text if text else f"[Page {page_num} - No extractable text]",
+                'hierarchy_path': hierarchy_path,
+                'hierarchy_context': hierarchy_context,
+                'metadata': page_metadata,
+            })
+            
+            # Cancel the alarm
+            signal.alarm(0)
+
+            if verbose:
+                print(f"  page {page_num}/{total_pages}")
+
+        except TimeoutException:
+            signal.alarm(0)
+            if verbose:
+                print(f"  page {page_num}/{total_pages} [timeout]")
+            pages_data.append({
+                'page': page_num,
+                'text': f"[Page {page_num} - Timeout during extraction]",
+                'hierarchy_path': [],
+                'hierarchy_context': '',
+                'metadata': {
+                    'headers': [],
+                    'section': None,
+                    'num_headers': 0,
+                    'has_bold': False,
+                    'has_italic': False,
+                    'has_text': False,
+                    'error': 'timeout'
+                }
+            })
+        except Exception as e:
+            signal.alarm(0)
+            if verbose:
+                print(f"  page {page_num}/{total_pages} error: {str(e)[:50]}")
+            pages_data.append({
+                'page': page_num,
+                'text': f"[Page {page_num} - Error extracting: {str(e)[:100]}]",
+                'hierarchy_path': [],
+                'hierarchy_context': '',
+                'metadata': {
+                    'headers': [],
+                    'section': None,
+                    'num_headers': 0,
+                    'has_bold': False,
+                    'has_italic': False,
+                    'has_text': False,
+                    'error': str(e)
+                }
+            })
     
     doc.close()
-    
-    # Extract title with LLM if requested
+
+    # Extract title: use provided generator, or create one only if requested and none passed
     title = None
     if extract_title_with_llm:
         try:
-            from .generator import Generator
-            print("Extracting title using LLM...")
-            with Generator() as generator:
-                title = generator.extract_title(pages_data)
-            print(f"Extracted title: {title}")
+            if generator is not None:
+                title = generator.extract_title(pages_data, verbose=verbose)
+            else:
+                from .generator import Generator
+                with Generator() as gen:
+                    title = gen.extract_title(pages_data, verbose=verbose)
         except Exception as e:
-            print(f"Failed to extract title with LLM: {e}")
-            import traceback
-            traceback.print_exc()
-            # Use fallback title instead of Unknown
+            if verbose:
+                import traceback
+                print(f"Title extraction failed: {e}")
+                traceback.print_exc()
             title = _generate_fallback_title_simple(pages_data)
-            print(f"Using fallback title: {title}")
     else:
-        # When LLM is not used, generate title from headers/content
         title = _generate_fallback_title_simple(pages_data)
     
     # Second pass: update hierarchy paths with title
@@ -304,24 +456,35 @@ def parse_pdf(pdf_path: Path, extract_title_with_llm: bool = False) -> Tuple[Lis
             page_data['hierarchy_context'] = hierarchy.format_context()
             page_data['metadata']['section'] = hierarchy.get_path()[-1] if hierarchy.get_path() else None
     
-    return pages_data, title
+    return pages_data, title, corrupted_pages_count
 
-def save_parsed_data(pages_data: List[Dict], pdf_name: str, output_path: Path, title: Optional[str] = None) -> None:
-    """Save parsed data to JSON file
-    
+
+def save_parsed_data(
+    pages_data: List[Dict],
+    pdf_name: str,
+    output_path: Path,
+    title: Optional[str] = None,
+    corrupted_pages_count: int = 0,
+) -> None:
+    """Save parsed data to JSON file.
+
     Args:
         pages_data: List of parsed page dictionaries
         pdf_name: Name of the PDF file
         output_path: Path to save JSON output
         title: Document title (optional)
+        corrupted_pages_count: Number of pages marked unreadable (font encoding)
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         'pdf_name': pdf_name,
         'title': title or 'Unknown',
         'total_pages': len(pages_data),
-        'pages': pages_data
+        'pages': pages_data,
     }
+    if corrupted_pages_count > 0:
+        data['parsing_issues'] = True
+        data['corrupted_pages_count'] = corrupted_pages_count
     output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 def process_pdf(pdf_path: Path, output_dir: Path, use_llm_for_title: bool = False) -> Path:
@@ -338,9 +501,9 @@ def process_pdf(pdf_path: Path, output_dir: Path, use_llm_for_title: bool = Fals
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
     
-    pages_data, title = parse_pdf(pdf_path, extract_title_with_llm=use_llm_for_title)
+    pages_data, title, corrupted_count = parse_pdf(pdf_path, extract_title_with_llm=use_llm_for_title)
     output_path = output_dir / f"{pdf_path.stem}.json"
-    save_parsed_data(pages_data, pdf_path.name, output_path, title)
+    save_parsed_data(pages_data, pdf_path.name, output_path, title, corrupted_pages_count=corrupted_count)
     
     return output_path
 

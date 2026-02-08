@@ -88,8 +88,8 @@ def example_search_and_retrieve():
         rag.load_index(str(index_path))
     
     # Perform search
-    print("\nSearching: 'What is the company vision?'")
-    results = rag.search_hybrid("What is the company vision?", top_k=3)
+    print("\nSearching: 'What is the vision statement?'")
+    results = rag.search_hybrid("What is the vision statement?", top_k=3)
     
     print(f"\nTop 3 results:")
     for i, result in enumerate(results, 1):

@@ -50,37 +50,37 @@ def calc_keyword_match(results: List[Dict], expected_keywords: List[str]) -> Dic
     }
 
 
-def calc_company_match(results: List[Dict], expected_company: Optional[str]) -> Dict[str, any]:
-    """Check if results contain the expected company
+def calc_document_match(results: List[Dict], expected_document: Optional[str]) -> Dict[str, any]:
+    """Check if results contain the expected document
     
     Args:
         results: List of search result dictionaries
-        expected_company: Expected company name (can be None for cross-company queries)
+        expected_document: Expected document title (can be None for cross-document queries)
     
     Returns:
-        Dictionary with company match info
+        Dictionary with document match info
     """
-    if not expected_company:
-        return {"company_match": True, "found_companies": []}
+    if not expected_document:
+        return {"document_match": True, "found_documents": []}
     
-    found_companies = set()
-    company_match = False
+    found_documents = set()
+    document_match = False
     
     for r in results:
         title = r.get('title', '').lower()
         chunk = r.get('chunk', r.get('content', r.get('text', ''))).lower()
         combined = title + " " + chunk
         
-        if expected_company.lower() in combined:
-            company_match = True
+        if expected_document.lower() in combined:
+            document_match = True
         
-        # Track which companies appear
+        # Track which documents appear
         if title:
-            found_companies.add(r.get('title', 'Unknown'))
+            found_documents.add(r.get('title', 'Unknown'))
     
     return {
-        "company_match": company_match,
-        "found_companies": list(found_companies)[:5]  # Top 5
+        "document_match": document_match,
+        "found_documents": list(found_documents)[:5]  # Top 5
     }
 
 
@@ -112,7 +112,7 @@ def evaluate(
     for tc in test_cases:
         query = tc['query']
         expected_keywords = tc.get('expected_keywords', [])
-        expected_company = tc.get('expected_company')
+        expected_document = tc.get('expected_document')
         
         # Execute query with orchestration
         if use_orchestrator:
@@ -126,7 +126,7 @@ def evaluate(
             search_results = exec_result['results']
         else:
             # Fallback to direct RAG call with simple title filter
-            title_filter = expected_company if expected_company else None
+            title_filter = expected_document if expected_document else None
             
             if method == 'hybrid':
                 search_results = orchestrator.rag.search_hybrid(
@@ -152,7 +152,7 @@ def evaluate(
         
         # Calculate metrics
         keyword_metrics = calc_keyword_match(search_results, expected_keywords)
-        company_metrics = calc_company_match(search_results, expected_company)
+        document_metrics = calc_document_match(search_results, expected_document)
         
         # Get result info
         result_info = []
@@ -170,12 +170,12 @@ def evaluate(
             'category': tc.get('category', 'unknown'),
             'difficulty': tc.get('difficulty', 'unknown'),
             'expected_keywords': expected_keywords,
-            'expected_company': expected_company,
+            'expected_document': expected_document,
             'match_score': keyword_metrics['match_score'],
             'found_keywords': keyword_metrics['found_keywords'],
             'missing_keywords': keyword_metrics['missing_keywords'],
-            'company_match': company_metrics['company_match'],
-            'found_companies': company_metrics['found_companies'],
+            'document_match': document_metrics['document_match'],
+            'found_documents': document_metrics['found_documents'],
             'top_results': result_info,
             'num_results': len(search_results)
         })
@@ -193,11 +193,11 @@ def print_summary(results: List[Dict], method: str, use_reranker: bool, top_k: i
     
     # Overall metrics
     avg_match = sum(r['match_score'] for r in results) / len(results)
-    company_accuracy = sum(1 for r in results if r['company_match']) / len(results)
+    document_accuracy = sum(1 for r in results if r['document_match']) / len(results)
     
     print(f"\nOverall Metrics ({len(results)} test cases):")
     print(f"  Keyword Match Score:  {avg_match:.1%}")
-    print(f"  Company Accuracy:     {company_accuracy:.1%}")
+    print(f"  Document Accuracy:    {document_accuracy:.1%}")
     
     # Recall and Precision @N metrics
     print(f"\nRetrieval Metrics:")
@@ -293,13 +293,13 @@ def print_examples(results: List[Dict], n: int = 5, show_failures: bool = True):
     
     for r in examples:
         status = "✓" if r['match_score'] >= 0.5 else "✗"
-        company_status = "✓" if r['company_match'] else "✗"
+        document_status = "✓" if r['document_match'] else "✗"
         
-        print(f"\n{status} Test {r['id']} [{r['difficulty']}] - Match: {r['match_score']:.0%} | Company: {company_status}")
+        print(f"\n{status} Test {r['id']} [{r['difficulty']}] - Match: {r['match_score']:.0%} | Document: {document_status}")
         print(f"   Query: {r['query']}")
         print(f"   Category: {r['category']}")
-        if r['expected_company']:
-            print(f"   Expected Company: {r['expected_company']}")
+        if r['expected_document']:
+            print(f"   Expected Document: {r['expected_document']}")
         print(f"   Keywords Found: {r['found_keywords']}")
         if r['missing_keywords']:
             print(f"   Keywords Missing: {r['missing_keywords']}")

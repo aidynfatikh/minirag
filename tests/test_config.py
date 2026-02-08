@@ -132,9 +132,9 @@ def test_config_values():
     print(f"    - Min chunk ratio: {config.document_processing.chunking.min_chunk_ratio}")
     print(f"    - Max chunk ratio: {config.document_processing.chunking.max_chunk_ratio}")
     
-    print("\n  Company Detection:")
-    print(f"    - Keywords: {len(config.company_detection.keywords)} keywords")
-    print(f"    - Preview lines: {config.company_detection.preview_lines}")
+    print("\n  Document Detection:")
+    print(f"    - Keywords: {len(config.document_detection.keywords)} keywords")
+    print(f"    - Preview lines: {config.document_detection.preview_lines}")
     
     print("\n  Paths:")
     print(f"    - PDFs: {config.paths.pdfs_dir}")

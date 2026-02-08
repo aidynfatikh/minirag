@@ -1,8 +1,19 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from typing import List, Dict, Optional
+import os
+from pathlib import Path
 
 from .config_loader import get_config, Config, GenerationConfig
+
+# Load environment variables from .env file if it exists
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass  # python-dotenv not installed
 
 
 class Generator:
@@ -36,8 +47,24 @@ class Generator:
         
         self.conversation_history = []
         
-        print(f"Loading {model_name} (quantized: {quantize})...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+        # Get HuggingFace token if available
+        hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
+        
+        # Try to use local files first, fall back to download if not available
+        try:
+            print(f"Loading {model_name} (quantized: {quantize})...")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name, 
+                local_files_only=True,
+                token=hf_token
+            )
+        except Exception as e:
+            print(f"  Model not cached locally, downloading from HuggingFace...")
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                token=hf_token
+            )
+        
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
@@ -48,21 +75,43 @@ class Generator:
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4"
             )
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                quantization_config=quantization_config,
-                device_map="auto",
-                low_cpu_mem_usage=True,
-                local_files_only=True,
-            )
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    quantization_config=quantization_config,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                    local_files_only=True,
+                    token=hf_token,
+                )
+            except Exception as e:
+                print(f"  Model not cached locally, downloading from HuggingFace...")
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    quantization_config=quantization_config,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                    token=hf_token,
+                )
         else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
-                device_map=self.device,
-                low_cpu_mem_usage=True,
-                local_files_only=True,
-            )
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
+                    device_map=self.device,
+                    low_cpu_mem_usage=True,
+                    local_files_only=True,
+                    token=hf_token,
+                )
+            except Exception as e:
+                print(f"  Model not cached locally, downloading from HuggingFace...")
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
+                    device_map=self.device,
+                    low_cpu_mem_usage=True,
+                    token=hf_token,
+                )
         self.model.eval()
         print(f"Model loaded")
     
@@ -196,16 +245,22 @@ class Generator:
         
         return {"answer": answer, "sources": sources}
     
-    def extract_title(self, pages_data: List[Dict], max_tokens: Optional[int] = None) -> str:
-        """Extract document title from pages using LLM with incremental page checking
-        
+    def extract_title(
+        self,
+        pages_data: List[Dict],
+        max_tokens: Optional[int] = None,
+        verbose: bool = False,
+    ) -> str:
+        """Extract document title from pages using LLM with incremental page checking.
+
         If initial pages don't yield a valid title, incrementally checks more pages
         until a title is found or max pages reached.
-        
+
         Args:
             pages_data: List of page dictionaries with 'page', 'text', and 'metadata'
             max_tokens: Maximum tokens for response (uses config default if None)
-            
+            verbose: If True, print extraction attempts and result
+
         Returns:
             Extracted title (never returns 'Unknown')
         """
@@ -220,7 +275,8 @@ class Generator:
         attempt = 1
         
         while current_pages <= max_pages:
-            print(f"  Attempting title extraction with {current_pages} pages (attempt {attempt})...")
+            if verbose:
+                print(f"  Attempting title extraction with {current_pages} pages (attempt {attempt})...")
             
             # Collect FULL text from current number of pages - don't hide anything
             preview_text_parts = []
@@ -238,7 +294,13 @@ class Generator:
                     preview_text_parts.append(f"=== PAGE {page_num} ===\nCONTENT:\n{text}")
             
             preview_text = '\n\n'.join(preview_text_parts)
-            
+
+            # If extracted text looks corrupted (PDF encoding/font issue), skip LLM and use fallback
+            if self._preview_text_looks_corrupted(preview_text):
+                if verbose:
+                    print(f"  Extracted text looks corrupted (encoding/font), using fallback title.")
+                break
+
             prompt_messages = [
                 {
                     "role": "system",
@@ -246,25 +308,25 @@ class Generator:
                         "You are an expert at extracting DISTINCTIVE document titles. "
                         "Your goal is to create a UNIQUE title that distinguishes this document from others. "
                         "\n\nRULES:"
-                        "\n1. ALWAYS include the COMPANY/ORGANIZATION NAME if visible"
+                        "\n1. ALWAYS include the ORGANIZATION/ENTITY NAME if visible"
                         "\n2. Include the document TYPE (Annual Report, Form 10-K, Financial Statements, etc.)"
                         "\n3. Include the YEAR if present"
-                        "\n4. Format: '[Company Name] [Document Type] [Year]' or similar distinctive format"
+                        "\n4. Format: '[Entity Name] [Document Type] [Year]' or similar distinctive format"
                         "\n\nEXAMPLES of GOOD titles:"
                         "\n- 'Apple Inc. Annual Report 2022'"
                         "\n- 'Microsoft Corporation Form 10-K 2023'"
                         "\n- 'Tesla Inc. Financial Statements Q4 2022'"
                         "\n- 'Amazon.com Inc. Proxy Statement 2023'"
                         "\n\nEXAMPLES of BAD titles (too generic):"
-                        "\n- 'Annual Report' (missing company name)"
-                        "\n- '2022 Annual Report' (missing company name)"
-                        "\n- 'Form 10-K' (missing company name)"
+                        "\n- 'Annual Report' (missing entity name)"
+                        "\n- '2022 Annual Report' (missing entity name)"
+                        "\n- 'Form 10-K' (missing entity name)"
                         "\n\nReturn ONLY the title, nothing else. If you truly cannot find any identifying information, return 'UNKNOWN_TITLE'."
                     )
                 },
                 {
                     "role": "user",
-                    "content": f"Extract a DISTINCTIVE title (including company name) from this document:\n\n{preview_text}\n\nDistinctive Title:"
+                    "content": f"Extract a DISTINCTIVE title (including entity/organization name) from this document:\n\n{preview_text}\n\nDistinctive Title:"
                 }
             ]
             
@@ -309,122 +371,102 @@ class Generator:
                     title = title[len(phrase):].strip()
                     break
             
-            # Check if we got a valid title
+            # Check if we got a valid, plausible title (reject garbage/encoding artifacts)
             invalid_titles = ['none', 'n/a', 'not found', 'unclear', 'unknown', '', 'unknown_title']
-            if title and title.lower() not in invalid_titles and len(title) > 2:
+            if (
+                title
+                and title.lower() not in invalid_titles
+                and len(title) > 2
+                and self._is_plausible_title(title)
+            ):
                 # Limit to reasonable length
                 if len(title) > 150:
                     title = title[:147] + '...'
-                print(f"  ✓ Title extracted: {title}")
+                if verbose:
+                    print(f"  Title: {title}")
                 return title
-            
+
             # If we didn't get a valid title and have more pages to check
             if current_pages < max_pages:
-                print(f"  ✗ No valid title found, trying with more pages...")
+                if verbose:
+                    print(f"  No valid title, trying with more pages...")
                 current_pages += increment
                 attempt += 1
             else:
                 break
-        
+
         # If we exhausted all attempts, use fallback based on first page content
-        print(f"  ⚠ Could not extract title from {max_pages} pages, using fallback...")
+        if verbose:
+            print(f"  Using fallback title (LLM did not return valid title).")
         fallback_title = self._generate_fallback_title(pages_data)
-        print(f"  ✓ Fallback title: {fallback_title}")
         return fallback_title
     
+    def _preview_text_looks_corrupted(self, preview_text: str, sample_len: int = 500) -> bool:
+        """True if text we extracted from the PDF looks like garbage (wrong encoding/font)."""
+        sample = (preview_text or "")[:sample_len]
+        if len(sample) < 20:
+            return False
+        allowed = set(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \n\r\t.,'-&();:!/"
+        )
+        allowed_count = sum(1 for c in sample if c in allowed)
+        return allowed_count < 0.5 * len(sample)
+
+    def _is_plausible_title(self, title: str) -> bool:
+        """Return False if title looks like garbage (wrong decoding, symbols, no words)."""
+        if not title or len(title) < 4:
+            return False
+        # Reject encoding-garbage symbols (font/ToUnicode corruption)
+        garbage_chars = set("=@<>;:\\")
+        if sum(1 for c in title if c in garbage_chars) > 2:
+            return False
+        # Document titles are usually multiple words (letters, digits, spaces, common punctuation)
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,'-&()")
+        allowed_count = sum(1 for c in title if c in allowed)
+        if allowed_count < 0.7 * len(title):
+            return False
+        # Should contain at least one space (e.g. "Company Name Annual Report 2022")
+        if ' ' not in title:
+            return False
+        # At least two "words" (letters/digits)
+        words = [w for w in title.split() if any(c.isalnum() for c in w)]
+        if len(words) < 2:
+            return False
+        return True
+
     def _generate_fallback_title(self, pages_data: List[Dict]) -> str:
-        """Generate a fallback title from document content
-        
+        """Generate a fallback title from document content.
+
         Args:
             pages_data: List of page dictionaries
-            
+
         Returns:
             Fallback title based on document structure
         """
+        if not pages_data:
+            return "Untitled Document"
+        first_meta = pages_data[0].get('metadata') or {}
+        # Prefer PDF document metadata title when page extraction was corrupted
+        pdf_title = first_meta.get('pdf_metadata_title') or ""
+        if pdf_title and self._is_plausible_title(pdf_title):
+            return pdf_title[:150]
         # Try to get title from first page headers
-        if pages_data and pages_data[0].get('metadata', {}).get('headers'):
-            first_header = pages_data[0]['metadata']['headers'][0]
+        if first_meta.get('headers'):
+            first_header = first_meta['headers'][0]
             header_text = first_header.get('text', '').strip()
-            if header_text and len(header_text) > 3:
+            if header_text and len(header_text) > 3 and self._is_plausible_title(header_text):
                 return header_text[:150]
-        
-        # Try to extract from first line of first page
-        if pages_data and pages_data[0].get('text'):
+        # Try to extract from first line of first page (only if it looks readable)
+        if pages_data[0].get('text'):
             first_text = pages_data[0]['text'].strip()
             first_line = first_text.split('\n')[0].strip()
-            if first_line and len(first_line) > 3 and len(first_line) < 150:
+            if (
+                first_line
+                and len(first_line) > 3
+                and len(first_line) < 150
+                and self._is_plausible_title(first_line)
+            ):
                 return first_line
         
         # Last resort: use filename-based title
         return "Untitled Document"
-    
-    def extract_company_name(self, text: str, max_tokens: Optional[int] = None) -> str:
-        """Extract company name from document text using LLM
-        
-        Args:
-            text: First 2 pages of document text
-            max_tokens: Maximum tokens for response (uses config default if None)
-            
-        Returns:
-            Extracted company name or 'Unknown'
-        """
-        comp_extract_config = self.gen_config.company_extraction
-        max_tokens = max_tokens or comp_extract_config.max_tokens
-        preview_chars = comp_extract_config.preview_chars
-        
-        prompt_messages = [
-            {
-                "role": "system",
-                "content": "Extract the company name from the document. Return ONLY the company name, nothing else."
-            },
-            {
-                "role": "user",
-                "content": f"Document:\n{text[:preview_chars]}\n\nCompany name:"
-            }
-        ]
-        
-        prompt = self.tokenizer.apply_chat_template(
-            prompt_messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
-        
-        max_input_length = comp_extract_config.max_input_length
-        inputs = self.tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=max_input_length
-        ).to(self.device)
-        
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                temperature=comp_extract_config.temperature,
-                do_sample=True,
-                top_p=self.gen_config.top_p,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-        
-        generated_ids = outputs[0][inputs['input_ids'].shape[1]:]
-        company_name = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        
-        # Clean up the response
-        company_name = company_name.strip('"\'.,')
-        
-        # If response is too long or contains explanation, try to extract just the name
-        if len(company_name) > 100 or '\n' in company_name:
-            lines = company_name.split('\n')
-            company_name = lines[0].strip()
-        
-        # Remove common prefixes/suffixes in responses
-        for phrase in ['The company is ', 'Company name: ', 'Company: ', 'Answer: ']:
-            if company_name.startswith(phrase):
-                company_name = company_name[len(phrase):].strip()
-        
-        # Validate result
-        if not company_name or company_name.lower() in ['none', 'n/a', 'not found', 'unclear', '']:
-            return 'Unknown'
-        
-        return company_name

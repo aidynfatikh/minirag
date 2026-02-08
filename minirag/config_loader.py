@@ -46,7 +46,7 @@ class SearchConfig:
     """Search configuration"""
     top_k: int = 5
     retrieve_multiplier: int = 4
-    company_filter_multiplier: int = 3
+    title_filter_multiplier: int = 3
     hybrid: HybridSearchConfig = field(default_factory=HybridSearchConfig)
     section_boost_weight: float = 2.0
 
@@ -64,13 +64,6 @@ class GenerationConfig:
     max_input_length: int = 6144
     
     @dataclass
-    class CompanyExtraction:
-        max_tokens: int = 30
-        temperature: float = 0.1
-        max_input_length: int = 2048
-        preview_chars: int = 3000
-    
-    @dataclass
     class TitleExtraction:
         max_tokens: int = 100
         temperature: float = 0.1
@@ -80,7 +73,6 @@ class GenerationConfig:
         max_pages_to_check: int = 10
         increment_pages: int = 2
     
-    company_extraction: CompanyExtraction = field(default_factory=CompanyExtraction)
     title_extraction: TitleExtraction = field(default_factory=TitleExtraction)
 
 
@@ -128,13 +120,13 @@ class LoggingConfig:
 
 
 @dataclass
-class CompanyDetectionConfig:
-    """Company detection configuration"""
+class DocumentDetectionConfig:
+    """Document detection configuration"""
     keywords: List[str] = field(default_factory=lambda: [
-        "CORPORATION", "COMPANY", "INC.", "INC", "LTD", "GROUP", "CO."
+        "CORPORATION", "INC.", "INC", "LTD", "GROUP", "CO.", "LLC", "LP"
     ])
-    min_company_name_length: int = 2
-    max_company_name_length: int = 60
+    min_title_length: int = 2
+    max_title_length: int = 60
     preview_lines: int = 15
     check_headers_count: int = 3
     min_word_length_for_partial_match: int = 3
@@ -158,7 +150,7 @@ class Config:
     document_processing: DocumentProcessingConfig = field(default_factory=DocumentProcessingConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    company_detection: CompanyDetectionConfig = field(default_factory=CompanyDetectionConfig)
+    document_detection: DocumentDetectionConfig = field(default_factory=DocumentDetectionConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     
     @classmethod
@@ -206,7 +198,7 @@ class Config:
             config.search = SearchConfig(
                 top_k=search_data.get('top_k', 5),
                 retrieve_multiplier=search_data.get('retrieve_multiplier', 4),
-                company_filter_multiplier=search_data.get('company_filter_multiplier', 3),
+                title_filter_multiplier=search_data.get('title_filter_multiplier', 3),
                 hybrid=HybridSearchConfig(
                     embedding_weight=hybrid_data.get('embedding_weight', 0.5),
                     bm25_weight=hybrid_data.get('bm25_weight', 0.5),
@@ -217,7 +209,6 @@ class Config:
         
         if 'generation' in data:
             gen_data = data['generation']
-            comp_extract = gen_data.get('company_extraction', {})
             title_extract = gen_data.get('title_extraction', {})
             config.generation = GenerationConfig(
                 max_tokens=gen_data.get('max_tokens', 800),
@@ -228,12 +219,6 @@ class Config:
                 history_window=gen_data.get('history_window', 6),
                 max_context_chunks=gen_data.get('max_context_chunks', 8),
                 max_input_length=gen_data.get('max_input_length', 6144),
-                company_extraction=GenerationConfig.CompanyExtraction(
-                    max_tokens=comp_extract.get('max_tokens', 30),
-                    temperature=comp_extract.get('temperature', 0.1),
-                    max_input_length=comp_extract.get('max_input_length', 2048),
-                    preview_chars=comp_extract.get('preview_chars', 3000)
-                ),
                 title_extraction=GenerationConfig.TitleExtraction(
                     max_tokens=title_extract.get('max_tokens', 50),
                     temperature=title_extract.get('temperature', 0.1),
@@ -272,9 +257,9 @@ class Config:
             log_data = data['logging']
             config.logging = LoggingConfig(**log_data)
         
-        if 'company_detection' in data:
-            comp_data = data['company_detection']
-            config.company_detection = CompanyDetectionConfig(**comp_data)
+        if 'document_detection' in data:
+            doc_det_data = data['document_detection']
+            config.document_detection = DocumentDetectionConfig(**doc_det_data)
         
         if 'performance' in data:
             perf_data = data['performance']

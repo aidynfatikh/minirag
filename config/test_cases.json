@@ -3,7 +3,7 @@
     "id": 1,
     "query": "What is Nordic American Tankers' overall business strategy?",
     "expected_keywords": ["NAT", "tanker", "strategy", "shipping"],
-    "expected_company": "Nordic American Tankers",
+    "expected_document": "Nordic American Tankers",
     "category": "business_strategy",
     "difficulty": "easy"
   },
@@ -11,7 +11,7 @@
     "id": 2,
     "query": "What are the revenue and financial highlights for Alcoa in 2022?",
     "expected_keywords": ["revenue", "$12.45 billion", "aluminum", "bauxite"],
-    "expected_company": "Alcoa",
+    "expected_document": "Alcoa",
     "category": "financial",
     "difficulty": "easy"
   },
@@ -19,7 +19,7 @@
     "id": 3,
     "query": "What gene therapy platforms does Verrica Pharmaceuticals have?",
     "expected_keywords": ["gene therapy", "VP-102", "VP-103", "biotechnology", "retinal"],
-    "expected_company": "Verrica Pharmaceuticals",
+    "expected_document": "Verrica Pharmaceuticals",
     "category": "business",
     "difficulty": "medium"
   },
@@ -27,7 +27,7 @@
     "id": 4,
     "query": "What is Weis Markets and when was it founded?",
     "expected_keywords": ["Weis Markets", "Pennsylvania", "1912", "retail", "food", "supermarket"],
-    "expected_company": "Weis Markets",
+    "expected_document": "Weis Markets",
     "category": "company_info",
     "difficulty": "easy"
   },
@@ -35,7 +35,7 @@
     "id": 5,
     "query": "What sustainability initiatives does Weis Markets have?",
     "expected_keywords": ["sustainability", "environment", "carbon footprint", "GreenChill", "EPA"],
-    "expected_company": "Weis Markets",
+    "expected_document": "Weis Markets",
     "category": "sustainability",
     "difficulty": "medium"
   },
@@ -43,7 +43,7 @@
     "id": 6,
     "query": "What is Westwater Resources involved in and what is AGP?",
     "expected_keywords": ["graphite", "Alabama", "AGP", "Alabama Graphite Products", "mineral"],
-    "expected_company": "Westwater Resources",
+    "expected_document": "Westwater Resources",
     "category": "business",
     "difficulty": "medium"
   },
@@ -51,7 +51,7 @@
     "id": 7,
     "query": "What is Ritchie Bros. Auctioneers and what do they do?",
     "expected_keywords": ["Ritchie Bros", "auction", "equipment", "sales"],
-    "expected_company": "Ritchie Bros. Auctioneers",
+    "expected_document": "Ritchie Bros. Auctioneers",
     "category": "company_info",
     "difficulty": "easy"
   },
@@ -59,7 +59,7 @@
     "id": 8,
     "query": "What anti-corruption compliance requirements does Ritchie Bros face?",
     "expected_keywords": ["FCPA", "Foreign Corrupt Practices Act", "anti-bribery", "compliance", "CFPOA"],
-    "expected_company": "Ritchie Bros. Auctioneers",
+    "expected_document": "Ritchie Bros. Auctioneers",
     "category": "risk",
     "difficulty": "medium"
   },
@@ -67,7 +67,7 @@
     "id": 9,
     "query": "What is Polyflor's history and when was it founded?",
     "expected_keywords": ["Polyflor", "1950", "manufacturing", "flooring"],
-    "expected_company": "Polyflor",
+    "expected_document": "Polyflor",
     "category": "company_info",
     "difficulty": "easy"
   },
@@ -75,7 +75,7 @@
     "id": 10,
     "query": "What are Polyflor's financial results for 2022?",
     "expected_keywords": ["revenue", "£291.9m", "operating profit", "£51.1 million"],
-    "expected_company": "Polyflor",
+    "expected_document": "Polyflor",
     "category": "financial",
     "difficulty": "easy"
   },
@@ -83,7 +83,7 @@
     "id": 11,
     "query": "What does SThree do and what is their focus?",
     "expected_keywords": ["SThree", "STEM", "talent", "recruitment", "staffing"],
-    "expected_company": "SThree",
+    "expected_document": "SThree",
     "category": "business",
     "difficulty": "easy"
   },
@@ -91,7 +91,7 @@
     "id": 12,
     "query": "What is SThree's geographic presence and market breakdown?",
     "expected_keywords": ["EMEA", "DACH", "USA", "APAC", "Europe", "international"],
-    "expected_company": "SThree",
+    "expected_document": "SThree",
     "category": "business",
     "difficulty": "medium"
   },
@@ -99,7 +99,7 @@
     "id": 13,
     "query": "What is MGM Resorts International and what businesses do they operate?",
     "expected_keywords": ["MGM", "casino", "gaming", "resorts", "Las Vegas"],
-    "expected_company": "MGM Resorts International",
+    "expected_document": "MGM Resorts International",
     "category": "company_info",
     "difficulty": "easy"
   },
@@ -107,7 +107,7 @@
     "id": 14,
     "query": "What is Pintec Technology and what VIE structures do they use?",
     "expected_keywords": ["Pintec", "China", "VIE", "technology", "holding company", "Cayman Islands"],
-    "expected_company": "Pintec Technology",
+    "expected_document": "Pintec Technology",
     "category": "business_structure",
     "difficulty": "hard"
   },
@@ -115,7 +115,7 @@
     "id": 15,
     "query": "What are IPL's company values and safety initiatives?",
     "expected_keywords": ["IPL", "Zero Harm", "safety", "values"],
-    "expected_company": "IPL",
+    "expected_document": "IPL",
     "category": "corporate_values",
     "difficulty": "medium"
   },
@@ -123,7 +123,7 @@
     "id": 16,
     "query": "What is Aeeris Ltd's financial position in 2022?",
     "expected_keywords": ["Aeeris", "cash", "$2,739,215", "revenue", "$2,210,529", "no debt"],
-    "expected_company": "Aeeris Ltd",
+    "expected_document": "Aeeris Ltd",
     "category": "financial",
     "difficulty": "easy"
   },
@@ -131,7 +131,7 @@
     "id": 17,
     "query": "What license agreements does Verrica Pharmaceuticals have with Torii?",
     "expected_keywords": ["Torii", "Japan", "license", "molluscum", "warts", "$0.5 million"],
-    "expected_company": "Verrica Pharmaceuticals",
+    "expected_document": "Verrica Pharmaceuticals",
     "category": "business_agreements",
     "difficulty": "hard"
   },
@@ -139,7 +139,7 @@
     "id": 18,
     "query": "What is RumbleOn and what products do they sell?",
     "expected_keywords": ["RumbleOn", "powersports", "motorcycle", "retail", "websites"],
-    "expected_company": "RumbleOn",
+    "expected_document": "RumbleOn",
     "category": "business",
     "difficulty": "easy"
   },
@@ -147,7 +147,7 @@
     "id": 19,
     "query": "How many retail locations does RumbleOn have?",
     "expected_keywords": ["55 retail locations", "60 websites", "powersports"],
-    "expected_company": "RumbleOn",
+    "expected_document": "RumbleOn",
     "category": "operations",
     "difficulty": "easy"
   },
@@ -155,7 +155,7 @@
     "id": 20,
     "query": "What is Enact Holdings' customer base like?",
     "expected_keywords": ["mortgage", "lenders", "1,800", "banks", "credit unions"],
-    "expected_company": "Enact Holdings",
+    "expected_document": "Enact Holdings",
     "category": "customers",
     "difficulty": "medium"
   },
@@ -163,7 +163,7 @@
     "id": 21,
     "query": "Who is Enact Holdings' largest customer and what percentage do they represent?",
     "expected_keywords": ["18%", "NIW", "top five", "30%"],
-    "expected_company": "Enact Holdings",
+    "expected_document": "Enact Holdings",
     "category": "customers",
     "difficulty": "medium"
   },
@@ -171,7 +171,7 @@
     "id": 22,
     "query": "What challenges did Mosaic Brands face during COVID-19?",
     "expected_keywords": ["pandemic", "lockdowns", "trading days", "Omicron"],
-    "expected_company": "Mosaic Brands",
+    "expected_document": "Mosaic Brands",
     "category": "events",
     "difficulty": "medium"
   },
@@ -179,7 +179,7 @@
     "id": 23,
     "query": "What is Alcoa's position on the aluminum cost curve?",
     "expected_keywords": ["aluminum", "cost curve", "second quartile", "renewable energy", "smelting"],
-    "expected_company": "Alcoa",
+    "expected_document": "Alcoa",
     "category": "operations",
     "difficulty": "medium"
   },
@@ -187,7 +187,7 @@
     "id": 24,
     "query": "What low-carbon aluminum products does Alcoa offer?",
     "expected_keywords": ["EcoLum", "EcoDura", "low-carbon", "recycled", "hydro-powered"],
-    "expected_company": "Alcoa",
+    "expected_document": "Alcoa",
     "category": "products",
     "difficulty": "medium"
   },
@@ -195,7 +195,7 @@
     "id": 25,
     "query": "How many employees does Alcoa have?",
     "expected_keywords": ["13,100", "employees"],
-    "expected_company": "Alcoa",
+    "expected_document": "Alcoa",
     "category": "company_info",
     "difficulty": "easy"
   },
@@ -203,7 +203,7 @@
     "id": 26,
     "query": "What is Seiko Epson Corporation's environmental vision?",
     "expected_keywords": ["Epson", "environment", "sustainability", "2050"],
-    "expected_company": "Seiko Epson",
+    "expected_document": "Seiko Epson",
     "category": "sustainability",
     "difficulty": "easy"
   },
@@ -211,7 +211,7 @@
     "id": 27,
     "query": "What is the dividend policy of any company in the dataset?",
     "expected_keywords": ["dividend", "shareholders", "payout"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "financial",
     "difficulty": "medium"
   },
@@ -219,7 +219,7 @@
     "id": 28,
     "query": "What forward-looking statements disclaimers are common in SEC filings?",
     "expected_keywords": ["forward-looking", "risks", "uncertainties", "safe harbor", "Private Securities Litigation Reform Act"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "legal",
     "difficulty": "easy"
   },
@@ -227,7 +227,7 @@
     "id": 29,
     "query": "What is abrdn Japan Investment Trust?",
     "expected_keywords": ["abrdn", "Japan", "investment", "trust", "annual report"],
-    "expected_company": "abrdn Japan Investment Trust",
+    "expected_document": "abrdn Japan Investment Trust",
     "category": "company_info",
     "difficulty": "easy"
   },
@@ -235,7 +235,7 @@
     "id": 30,
     "query": "What is Blue Apron Holdings and what industry are they in?",
     "expected_keywords": ["Blue Apron", "meal kit", "food"],
-    "expected_company": "Blue Apron Holdings",
+    "expected_document": "Blue Apron Holdings",
     "category": "company_info",
     "difficulty": "easy"
   },
@@ -243,7 +243,7 @@
     "id": 31,
     "query": "What is Aurora Innovation working on?",
     "expected_keywords": ["Aurora", "autonomous", "self-driving", "technology"],
-    "expected_company": "Aurora Innovation",
+    "expected_document": "Aurora Innovation",
     "category": "business",
     "difficulty": "medium"
   },
@@ -251,7 +251,7 @@
     "id": 32,
     "query": "What is Bionano Genomics and what technology do they develop?",
     "expected_keywords": ["Bionano", "genomics", "genetic", "DNA"],
-    "expected_company": "Bionano Genomics",
+    "expected_document": "Bionano Genomics",
     "category": "business",
     "difficulty": "medium"
   },
@@ -259,7 +259,7 @@
     "id": 33,
     "query": "What is Tellurian Inc and what sector do they operate in?",
     "expected_keywords": ["Tellurian", "energy", "natural gas", "LNG"],
-    "expected_company": "Tellurian Inc",
+    "expected_document": "Tellurian Inc",
     "category": "business",
     "difficulty": "medium"
   },
@@ -267,7 +267,7 @@
     "id": 34,
     "query": "What is CoreCard Corporation's business?",
     "expected_keywords": ["CoreCard", "financial", "technology", "payment", "processing"],
-    "expected_company": "CoreCard Corporation",
+    "expected_document": "CoreCard Corporation",
     "category": "business",
     "difficulty": "medium"
   },
@@ -275,7 +275,7 @@
     "id": 35,
     "query": "What risk factors are common across Form 10-K filings?",
     "expected_keywords": ["risk factors", "competition", "regulatory", "economic", "market"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "risk",
     "difficulty": "hard"
   },
@@ -283,7 +283,7 @@
     "id": 36,
     "query": "How do companies typically describe their corporate governance?",
     "expected_keywords": ["governance", "board", "directors", "audit committee", "ethics"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "governance",
     "difficulty": "medium"
   },
@@ -291,7 +291,7 @@
     "id": 37,
     "query": "What is Infinera Corporation and what products do they make?",
     "expected_keywords": ["Infinera", "optical", "networking", "telecommunications"],
-    "expected_company": "Infinera Corporation",
+    "expected_document": "Infinera Corporation",
     "category": "business",
     "difficulty": "medium"
   },
@@ -299,7 +299,7 @@
     "id": 38,
     "query": "What is NextNav Inc and what technology do they provide?",
     "expected_keywords": ["NextNav", "location", "positioning", "GPS"],
-    "expected_company": "NextNav Inc",
+    "expected_document": "NextNav Inc",
     "category": "business",
     "difficulty": "medium"
   },
@@ -307,7 +307,7 @@
     "id": 39,
     "query": "What is MainStreet Bancshares and what region do they serve?",
     "expected_keywords": ["MainStreet", "bank", "banking", "financial services"],
-    "expected_company": "MainStreet Bancshares",
+    "expected_document": "MainStreet Bancshares",
     "category": "business",
     "difficulty": "easy"
   },
@@ -315,7 +315,7 @@
     "id": 40,
     "query": "What is Insperity's business model?",
     "expected_keywords": ["Insperity", "HR", "human resources", "payroll", "employee"],
-    "expected_company": "Insperity",
+    "expected_document": "Insperity",
     "category": "business",
     "difficulty": "medium"
   },
@@ -323,7 +323,7 @@
     "id": 41,
     "query": "What are typical management discussion topics in annual reports?",
     "expected_keywords": ["management discussion", "financial condition", "results of operations", "liquidity"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "reporting",
     "difficulty": "medium"
   },
@@ -331,7 +331,7 @@
     "id": 42,
     "query": "What is Bridgewater Bancshares and where are they located?",
     "expected_keywords": ["Bridgewater", "bank", "banking"],
-    "expected_company": "Bridgewater Bancshares",
+    "expected_document": "Bridgewater Bancshares",
     "category": "company_info",
     "difficulty": "easy"
   },
@@ -339,7 +339,7 @@
     "id": 43,
     "query": "What is Form 20-F and which companies file it?",
     "expected_keywords": ["Form 20-F", "foreign", "SEC", "annual report"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "regulatory",
     "difficulty": "medium"
   },
@@ -347,7 +347,7 @@
     "id": 44,
     "query": "What is Swiss Water Decaffeinated and what process do they use?",
     "expected_keywords": ["Swiss Water", "decaf", "coffee", "process"],
-    "expected_company": "Swiss Water Decaffeinated",
+    "expected_document": "Swiss Water Decaffeinated",
     "category": "business",
     "difficulty": "medium"
   },
@@ -355,7 +355,7 @@
     "id": 45,
     "query": "What is Liberty Broadband Corporation and what do they invest in?",
     "expected_keywords": ["Liberty Broadband", "cable", "telecommunications", "Charter"],
-    "expected_company": "Liberty Broadband Corporation",
+    "expected_document": "Liberty Broadband Corporation",
     "category": "business",
     "difficulty": "medium"
   },
@@ -363,7 +363,7 @@
     "id": 46,
     "query": "What bauxite and alumina production does Alcoa have?",
     "expected_keywords": ["bauxite", "42.1 million", "alumina", "first quartile"],
-    "expected_company": "Alcoa",
+    "expected_document": "Alcoa",
     "category": "operations",
     "difficulty": "medium"
   },
@@ -371,7 +371,7 @@
     "id": 47,
     "query": "What percentage of Alcoa's smelting is powered by renewable energy?",
     "expected_keywords": ["86 percent", "renewable energy", "smelting", "hydro"],
-    "expected_company": "Alcoa",
+    "expected_document": "Alcoa",
     "category": "sustainability",
     "difficulty": "easy"
   },
@@ -379,7 +379,7 @@
     "id": 48,
     "query": "What is NZME Limited and what market do they serve?",
     "expected_keywords": ["NZME", "New Zealand", "media"],
-    "expected_company": "NZME Limited",
+    "expected_document": "NZME Limited",
     "category": "company_info",
     "difficulty": "medium"
   },
@@ -387,7 +387,7 @@
     "id": 49,
     "query": "What is Structural Monitoring Systems PLC?",
     "expected_keywords": ["Structural Monitoring", "monitoring", "systems"],
-    "expected_company": "Structural Monitoring Systems",
+    "expected_document": "Structural Monitoring Systems",
     "category": "company_info",
     "difficulty": "medium"
   },
@@ -395,7 +395,7 @@
     "id": 50,
     "query": "What is Beazley's business in insurance?",
     "expected_keywords": ["Beazley", "insurance", "underwriting"],
-    "expected_company": "Beazley",
+    "expected_document": "Beazley",
     "category": "business",
     "difficulty": "medium"
   },
@@ -403,7 +403,7 @@
     "id": 51,
     "query": "Compare the revenue figures across different companies in the annual reports",
     "expected_keywords": ["revenue", "sales", "million", "billion"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "financial_comparison",
     "difficulty": "hard"
   },
@@ -411,7 +411,7 @@
     "id": 52,
     "query": "What cybersecurity or data privacy risks are mentioned in the filings?",
     "expected_keywords": ["cybersecurity", "data privacy", "breach", "security"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "risk",
     "difficulty": "hard"
   },
@@ -419,7 +419,7 @@
     "id": 53,
     "query": "What supply chain challenges do companies mention?",
     "expected_keywords": ["supply chain", "disruption", "logistics", "inventory"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "risk",
     "difficulty": "hard"
   },
@@ -427,7 +427,7 @@
     "id": 54,
     "query": "What is Armadale Capital Plc and what do they invest in?",
     "expected_keywords": ["Armadale Capital", "investment", "mining"],
-    "expected_company": "Armadale Capital",
+    "expected_document": "Armadale Capital",
     "category": "business",
     "difficulty": "medium"
   },
@@ -435,7 +435,7 @@
     "id": 55,
     "query": "What is Brave Bison and what industry are they in?",
     "expected_keywords": ["Brave Bison", "media", "digital"],
-    "expected_company": "Brave Bison",
+    "expected_document": "Brave Bison",
     "category": "company_info",
     "difficulty": "medium"
   },
@@ -443,7 +443,7 @@
     "id": 56,
     "query": "What pharmaceutical products is Verrica developing for molluscum?",
     "expected_keywords": ["molluscum", "VP-102", "treatment", "skin"],
-    "expected_company": "Verrica Pharmaceuticals",
+    "expected_document": "Verrica Pharmaceuticals",
     "category": "products",
     "difficulty": "medium"
   },
@@ -451,7 +451,7 @@
     "id": 57,
     "query": "What is Datalogic and what technology do they make?",
     "expected_keywords": ["Datalogic", "barcode", "scanner", "automation"],
-    "expected_company": "Datalogic",
+    "expected_document": "Datalogic",
     "category": "business",
     "difficulty": "medium"
   },
@@ -459,7 +459,7 @@
     "id": 58,
     "query": "What store count and sizes does Weis Markets operate?",
     "expected_keywords": ["stores", "square feet", "49,000", "supermarket"],
-    "expected_company": "Weis Markets",
+    "expected_document": "Weis Markets",
     "category": "operations",
     "difficulty": "medium"
   },
@@ -467,7 +467,7 @@
     "id": 59,
     "query": "What ownership structure does Weis Markets have?",
     "expected_keywords": ["Weis family", "65%", "shares", "Jonathan", "Chairman"],
-    "expected_company": "Weis Markets",
+    "expected_document": "Weis Markets",
     "category": "governance",
     "difficulty": "medium"
   },
@@ -475,7 +475,7 @@
     "id": 60,
     "query": "What are the major segments discussed in Form 10-K filings?",
     "expected_keywords": ["Part I", "Part II", "Business", "Risk Factors", "Financial Statements"],
-    "expected_company": null,
+    "expected_document": null,
     "category": "regulatory",
     "difficulty": "easy"
   }

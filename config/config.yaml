@@ -48,7 +48,7 @@ indexing:
 search:
   top_k: 5
   retrieve_multiplier: 4  # Retrieve top_k * multiplier for reranking
-  company_filter_multiplier: 3  # Additional multiplier when filtering
+  title_filter_multiplier: 3  # Additional multiplier when filtering by title
   
   # Hybrid Search Weights
   hybrid:

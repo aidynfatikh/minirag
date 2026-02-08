@@ -69,7 +69,7 @@ def main():
     print("\n" + "="*80)
     print("Commands:")
     print("  Just type your question - the system will automatically:")
-    print("    • Extract company names from your query")
+    print("    • Extract document titles from your query")
     print("    • Rephrase for better retrieval")
     print("    • Generate conversational answers")
     print()
@@ -116,8 +116,8 @@ def main():
             )
             
             # Show what the orchestrator did
-            if result['extracted_company']:
-                print(f"🏢 Company: {result['extracted_company']}")
+            if result['extracted_title']:
+                print(f"📄 Document: {result['extracted_title']}")
             if result['title_filter']:
                 print(f"📑 Document: {result['title_filter']}")
             if result['search_query'] != query:

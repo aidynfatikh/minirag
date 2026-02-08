@@ -6,9 +6,19 @@ import re
 from rank_bm25 import BM25Okapi
 import numpy as np
 from pathlib import Path
+import os
 
 from .generator import Generator
 from .config_loader import get_config, Config
+
+# Load environment variables from .env file if it exists
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    pass  # python-dotenv not installed
 
 class RAG:
     """Retrieval-Augmented Generation system with hybrid search and reranking"""
@@ -44,8 +54,16 @@ class RAG:
         self.is_e5_model = 'e5-' in self.model_name.lower()
         device = emb_config.get('device', 'cuda')
         
+        # Get HuggingFace token if available
+        hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
+        
         print(f"Loading embedding model: {self.model_name}...")
-        self.model = SentenceTransformer(self.model_name, device=device, local_files_only=True)
+        try:
+            self.model = SentenceTransformer(self.model_name, device=device, local_files_only=True, token=hf_token)
+        except Exception as e:
+            print(f"  Model not cached locally, downloading from HuggingFace...")
+            self.model = SentenceTransformer(self.model_name, device=device, token=hf_token)
+        
         self.embedding_dim = self.model.get_sentence_embedding_dimension()
         print(f"Embedding dimension: {self.embedding_dim}")
         
@@ -55,7 +73,11 @@ class RAG:
             reranker_name = rerank_config.get('name', 'cross-encoder/ms-marco-MiniLM-L-12-v2')
             reranker_device = rerank_config.get('device', 'cuda')
             print(f"Loading cross-encoder reranker: {reranker_name}...")
-            self.reranker = CrossEncoder(reranker_name, device=reranker_device, local_files_only=True)
+            try:
+                self.reranker = CrossEncoder(reranker_name, device=reranker_device, local_files_only=True, token=hf_token)
+            except Exception as e:
+                print(f"  Model not cached locally, downloading from HuggingFace...")
+                self.reranker = CrossEncoder(reranker_name, device=reranker_device, token=hf_token)
         else:
             self.reranker = None
         
@@ -522,7 +544,7 @@ class RAG:
         retrieve_multiplier = self.config.search.retrieve_multiplier
         retrieve_k = top_k * retrieve_multiplier if use_reranker and self.reranker else top_k
         if title_filter:
-            filter_mult = self.config.search.company_filter_multiplier
+            filter_mult = self.config.search.title_filter_multiplier
             retrieve_k = min(retrieve_k * filter_mult, len(self.chunks))
         
         self.index.hnsw.efSearch = ef_search
@@ -601,7 +623,7 @@ class RAG:
         retrieve_multiplier = self.config.search.retrieve_multiplier
         retrieve_k = top_k * retrieve_multiplier if use_reranker and self.reranker else top_k
         if title_filter:
-            filter_mult = self.config.search.company_filter_multiplier
+            filter_mult = self.config.search.title_filter_multiplier
             retrieve_k = min(retrieve_k * filter_mult, len(self.chunks))
         
         tokenized_query = query.lower().split()
